@@ -384,7 +384,10 @@ function LinePage({ line, visits, onToggle, onOpen, onBack, t }: {
     <>
       <button className="back" onClick={onBack}>‹ {t.back}</button>
       <section className="line-head">
-        <LineBadge line={line} />
+        <div className="line-title">
+          <LineBadge line={line} />
+          {line.main.length > 1 && <span>{t.lineSpan(line.main[0].name, line.main[line.main.length - 1].name)}</span>}
+        </div>
         <div className="line-num"><b>{n}</b> {t.of} {total} {n === total ? `· ${t.done} 🎉` : ''}</div>
         <Progress value={n} total={total} color={line.color} />
       </section>

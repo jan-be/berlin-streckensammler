@@ -144,6 +144,7 @@ main { flex: 1; }
 .mode-num b, .line-num b { color: var(--text); font-size: 1.15rem; }
 .line-row .badge { min-width: 44px; }
 .line-head { flex-direction: column; align-items: flex-start; }
+.line-title { display: flex; align-items: center; gap: 10px; font-weight: 650; }
 .line-head .bar { width: 100%; }
 .back { color: var(--accent); font-weight: 600; padding: 6px 2px; }
 
