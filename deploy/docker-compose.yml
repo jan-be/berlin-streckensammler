@@ -16,6 +16,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    environment:
+      # where the app is served: passkeys are bound to this origin
+      - ORIGIN=https://berlin-streckensammler.janbe.eu
     volumes:
       # the SQLite database (owned by uid 1000 = jan on the host)
       - $HOME/docker_files/streckensammler:/data

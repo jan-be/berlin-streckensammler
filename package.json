@@ -11,6 +11,8 @@
     "data": "bun scripts/build-data.ts"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "^14",
+    "@simplewebauthn/server": "^14",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

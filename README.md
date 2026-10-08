@@ -13,10 +13,13 @@ Live at https://berlin-streckensammler.janbe.eu
 - **One Bun process** (`src/server.ts`) serves everything: the React app, which
   Bun bundles from `src/index.html`, the station data and a small JSON API.
   No separate web server.
-- **SQLite** (`bun:sqlite`, `src/db.ts`): accounts, sessions and visits. An account
-  is just a random 16-character sync code (no name, e-mail or password), created
-  with the first collected station. Entering the code on another device signs
-  that device in and merges what it had collected.
+- **SQLite** (`bun:sqlite`, `src/db.ts`): users, sessions, passkeys and visits.
+  Collecting needs no account: the first station collected starts an anonymous
+  collection tied to a session cookie. **Accounts** (`src/auth.ts`) are a name plus
+  passkeys (WebAuthn via `@simplewebauthn`, discoverable credentials, so signing in
+  needs no name). Creating an account or signing in takes over the anonymous
+  collection of that browser; more passkeys can be added for other devices or
+  password managers, and the last one cannot be removed.
 - **Station data** (`data/stations.json`, committed) comes from VBB's GTFS open
   data (CC BY 4.0), built by `scripts/build-data.ts`:
   - a station is a named stop; its modes and lines come from the trips stopping there;
@@ -30,6 +33,7 @@ Live at https://berlin-streckensammler.janbe.eu
 ```bash
 bun install
 bun run dev        # http://localhost:3000, hot reload (PORT=... to change)
+                   # passkeys work on localhost; production needs ORIGIN=https://...
 bun test
 bun run typecheck
 ```

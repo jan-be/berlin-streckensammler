@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { decode, nearest, search, MODES, type Line, type Mode, type Network, type Station } from './data';
-import { api, ApiError, localToday } from './api';
-import { STRINGS, formatDate, initialLang, type Lang } from './i18n';
+import { api, ApiError, cancelled, localToday, passkeysSupported, type Account } from './api';
+import { STRINGS, formatDate, initialLang, type Lang, type T } from './i18n';
+import { MODE_COLOR, ModeIcon, PasskeyIcon } from './icons';
+import { providerName } from './passkeyProviders';
 
 // ── routes ─────────────────────────────────────────────────────────────────
 const SLUG: Record<Mode, string> = { S: 's-bahn', U: 'u-bahn', R: 'regio', T: 'tram', B: 'bus', F: 'faehre' };
@@ -15,9 +17,6 @@ function parseRoute(path: string): Route {
 }
 const routePath = (r: Route) => (r.mode ? `/${SLUG[r.mode]}${r.line ? `/${encodeURIComponent(r.line)}` : ''}` : '/');
 
-export const MODE_COLOR: Record<Mode, string> = { S: '#008D4F', U: '#115D91', R: '#E2001A', T: '#9B1B30', B: '#95276E', F: '#0098D4' };
-const SHORT: Record<Mode, string> = { S: 'S', U: 'U', R: 'RE', T: 'Tram', B: 'Bus', F: 'F' };
-
 const key = (station: string, mode: Mode) => `${station}|${mode}`;
 
 /** Black or white text on a line colour */
@@ -27,6 +26,10 @@ function textOn(hex: string) {
   return 0.299 * r + 0.587 * g + 0.114 * b > 170 ? '#1a1a1a' : '#fff';
 }
 
+const BANNER_KEY = 'saveBannerDismissed';
+const readFlag = (k: string) => { try { return localStorage.getItem(k) === '1'; } catch { return false; } };
+const setFlag = (k: string) => { try { localStorage.setItem(k, '1'); } catch { /* */ } };
+
 // ── app ────────────────────────────────────────────────────────────────────
 export function App() {
   const [lang, setLang] = useState<Lang>(initialLang);
@@ -34,27 +37,31 @@ export function App() {
   const [net, setNet] = useState<Network | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [visits, setVisits] = useState<Map<string, string>>(new Map());
-  const [code, setCode] = useState<string | null>(null);
+  const [account, setAccount] = useState<Account | null>(null);
   const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname));
   const [query, setQuery] = useState('');
   const [near, setNear] = useState<{ status: 'loading' | 'denied' | 'unavailable' | 'ok'; at?: { lat: number; lon: number } } | null>(null);
   const [sheet, setSheet] = useState<Station | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [bannerGone, setBannerGone] = useState(() => readFlag(BANNER_KEY));
 
   useEffect(() => { document.documentElement.lang = lang; try { localStorage.setItem('lang', lang); } catch { /* */ } }, [lang]);
 
+  const loadMe = useCallback(async () => {
+    const me = await api.me();
+    setVisits(new Map(me.visits.map(([s, m, d]) => [key(s, m), d])));
+    setAccount(me.account);
+  }, []);
   const load = useCallback(async () => {
     try {
-      const [raw, me] = await Promise.all([api.data(), api.me()]);
+      const [raw] = await Promise.all([api.data(), loadMe()]);
       setNet(decode(raw as Parameters<typeof decode>[0]));
-      setVisits(new Map(me.visits.map(([s, m, d]) => [key(s, m), d])));
-      setCode(me.code);
       setLoadError(false);
     } catch {
       setLoadError(true);
     }
-  }, []);
+  }, [loadMe]);
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
@@ -76,7 +83,11 @@ export function App() {
     return () => clearTimeout(id);
   }, [toast]);
 
-  const fail = useCallback((e: unknown) => setToast(e instanceof ApiError && e.status === 0 ? t.offline : t.error), [t]);
+  const fail = useCallback((e: unknown) => {
+    if (cancelled(e)) return;
+    if (e instanceof ApiError) setToast(e.status === 0 ? t.offline : t.errors[e.code] ?? t.error);
+    else setToast(t.error);
+  }, [t]);
 
   /** Collect or drop a station in a mode: shown at once, undone if the server says no */
   const toggle = useCallback(async (s: Station, mode: Mode) => {
@@ -85,7 +96,7 @@ export function App() {
     setVisits(v => { const n = new Map(v); had ? n.delete(k) : n.set(k, localToday()); return n; });
     try {
       if (had) await api.uncollect(s.id, mode);
-      else { const r = await api.collect(s.id, mode); setCode(r.code); }
+      else await api.collect(s.id, mode);
     } catch (e) {
       setVisits(v => { const n = new Map(v); had ? n.set(k, had) : n.delete(k); return n; });
       fail(e);
@@ -132,39 +143,41 @@ export function App() {
   const line = route.line ? net.linesByMode[route.mode!]?.find(l => l.name === route.line) ?? null : null;
   const results = query.trim() ? search(net.stations, query, mode) : null;
   const nearby = near?.status === 'ok' && near.at ? nearest(net.stations, near.at, mode) : null;
+  const showBanner = !account && !bannerGone && visits.size >= 3 && !mode && !results && !near;
 
   return (
     <div className="app">
       <header className="top">
         <button className="brand" onClick={() => go({ mode: null, line: null })}>
-          <span className="brand-mark" aria-hidden="true">
-            <span style={{ background: MODE_COLOR.S }}>S</span><span style={{ background: MODE_COLOR.U }}>U</span>
-          </span>
+          <span className="brand-mark" aria-hidden="true"><ModeIcon mode="S" size={24} /><ModeIcon mode="U" size={24} /></span>
           <span className="brand-text">{t.title}</span>
         </button>
-        <button className="icon-btn" onClick={() => setAccountOpen(true)} aria-label={t.account}>
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" strokeWidth="2" /><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+        <button className={`account-btn ${account ? 'in' : ''}`} onClick={() => setAccountOpen(true)} aria-label={account ? `${t.account}: ${account.name}` : t.signIn}>
+          {account ? <span className="avatar" aria-hidden="true">{account.name.slice(0, 1).toUpperCase()}</span> : <PasskeyIcon />}
+          <span className="account-label">{account ? account.name : t.signIn}</span>
         </button>
       </header>
 
       <nav className="tabs" aria-label={t.lines}>
-        <button className={`tab ${!mode ? 'on' : ''}`} onClick={() => go({ mode: null, line: null })}>{t.all}</button>
+        <button className={`tab all ${!mode ? 'on' : ''}`} onClick={() => go({ mode: null, line: null })}>{t.all}</button>
         {MODES.map(m => (
           <button key={m} className={`tab ${mode === m ? 'on' : ''}`} style={{ '--mode': MODE_COLOR[m] } as React.CSSProperties}
-            onClick={() => go({ mode: m, line: null })}>
-            <span className="tab-label">{t.modes[m]}</span>
-            <span className="tab-count">{collectedIn(m)}/{net.count[m]}</span>
+            onClick={() => go({ mode: m, line: null })} aria-label={`${t.modes[m]}: ${collectedIn(m)} ${t.of} ${net.count[m]}`}>
+            <ModeIcon mode={m} size={22} />
+            <span className="tab-count">{collectedIn(m)}<span className="tab-total">/{net.count[m]}</span></span>
           </button>
         ))}
       </nav>
 
       <div className="searchbar">
         <div className="search-field">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" /><path d="m20 20-3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+          {mode ? <ModeIcon mode={mode} size={18} /> : (
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" /><path d="m20 20-3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+          )}
           <input
             type="search" value={query} onChange={e => { setQuery(e.target.value); setNear(null); }}
             placeholder={mode ? t.searchPlaceholderMode(t.modeLong[mode]) : t.searchPlaceholder}
-            aria-label={t.searchPlaceholder} autoComplete="off" spellCheck={false} enterKeyHint="search"
+            aria-label={mode ? t.searchPlaceholderMode(t.modeLong[mode]) : t.searchPlaceholder} autoComplete="off" spellCheck={false} enterKeyHint="search"
           />
           {query && <button className="clear" onClick={() => setQuery('')} aria-label="×">×</button>}
         </div>
@@ -175,6 +188,16 @@ export function App() {
       </div>
 
       <main>
+        {showBanner && (
+          <div className="banner">
+            <PasskeyIcon size={22} />
+            <div className="banner-text">{t.saveBanner(visits.size)}</div>
+            <div className="banner-actions">
+              <button className="btn small primary" onClick={() => setAccountOpen(true)}>{t.saveBannerAction}</button>
+              <button className="link small" onClick={() => { setFlag(BANNER_KEY); setBannerGone(true); }}>{t.later}</button>
+            </div>
+          </div>
+        )}
         {results ? (
           <StationList stations={results} mode={mode} visits={visits} onToggle={toggle} onOpen={setSheet} t={t} empty={t.noResults} />
         ) : near ? (
@@ -204,14 +227,15 @@ export function App() {
         <p><button className="link" onClick={() => setLang(lang === 'de' ? 'en' : 'de')}>{t.language}</button> · <button className="link" onClick={() => setAccountOpen(true)}>{t.privacyTitle}</button></p>
       </footer>
 
-      {sheet && <StationSheet station={sheet} visits={visits} onToggle={toggle} onDate={setDate} onClose={() => setSheet(null)} onLine={l => { setSheet(null); go({ mode: l.mode, line: l.name }); }} lang={lang} t={t} />}
-      {accountOpen && <AccountSheet code={code} onClose={() => setAccountOpen(false)} onChanged={load} t={t} />}
+      {sheet && <StationSheet station={sheet} visits={visits} onToggle={toggle} onDate={setDate} onClose={() => setSheet(null)} onLine={l => { setSheet(null); go({ mode: l.mode, line: l.name }); }} t={t} />}
+      {accountOpen && (
+        <AccountSheet account={account} collected={visits.size} lang={lang} t={t}
+          onClose={() => setAccountOpen(false)} onChanged={loadMe} onToast={setToast} onError={fail} />
+      )}
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
 }
-
-type T = (typeof STRINGS)['de'];
 
 // ── pieces ─────────────────────────────────────────────────────────────────
 export function LineBadge({ line, small }: { line: Line; small?: boolean }) {
@@ -230,12 +254,13 @@ function Check({ on, color, label, onClick, big }: { on: boolean; color: string;
   );
 }
 
-function ModeChip({ mode, on, label, onClick }: { mode: Mode; on: boolean; label: string; onClick: () => void }) {
+/** A mode's sign as a toggle: grey until collected, then in colour with a tick */
+function ModeToggle({ mode, on, label, onClick, size = 30 }: { mode: Mode; on: boolean; label: string; onClick: () => void; size?: number }) {
   return (
-    <button className={`chip ${on ? 'on' : ''}`} style={{ '--c': MODE_COLOR[mode] } as React.CSSProperties}
-      aria-pressed={on} aria-label={label} title={label} onClick={e => { e.stopPropagation(); onClick(); }}>
-      {on && <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
-      {SHORT[mode]}
+    <button className={`mode-toggle ${on ? 'on' : ''}`} aria-pressed={on} aria-label={label} title={label}
+      onClick={e => { e.stopPropagation(); onClick(); }}>
+      <ModeIcon mode={mode} size={size} />
+      {on && <span className="tick" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" /></svg></span>}
     </button>
   );
 }
@@ -249,6 +274,7 @@ function StationList({ stations, distances, mode, visits, onToggle, onOpen, t, e
     <ul className="list">
       {stations.map((s, i) => {
         const lines = mode ? s.lines[mode] ?? [] : MODES.filter(m => m !== 'B').flatMap(m => s.lines[m] ?? []);
+        const bus = !mode ? s.lines.B ?? [] : [];
         return (
           <li key={s.id} className="row" onClick={() => onOpen(s)}>
             <div className="row-main">
@@ -257,15 +283,17 @@ function StationList({ stations, distances, mode, visits, onToggle, onOpen, t, e
                 {distances && <span className="dist">{t.meters(distances[i])}</span>}
                 {lines.slice(0, 10).map(l => <LineBadge key={l.id} line={l} small />)}
                 {lines.length > 10 && <span className="muted small">+{lines.length - 10}</span>}
-                {!mode && s.modes.includes('B') && <span className="muted small">{(s.lines.B ?? []).length > 0 ? `Bus ${(s.lines.B ?? []).slice(0, 4).map(l => l.name).join(', ')}${(s.lines.B ?? []).length > 4 ? ' …' : ''}` : ''}</span>}
+                {bus.length > 0 && (
+                  <span className="bus-lines"><ModeIcon mode="B" size={14} /> {bus.slice(0, 4).map(l => l.name).join(', ')}{bus.length > 4 ? ' …' : ''}</span>
+                )}
                 {s.note && <span className="note">{t.closedNote[s.note] ?? s.note}</span>}
               </div>
             </div>
             {mode ? (
               <Check big on={visits.has(key(s.id, mode))} color={MODE_COLOR[mode]} label={(visits.has(key(s.id, mode)) ? t.uncollect : t.collect)(s.name, t.modes[mode])} onClick={() => onToggle(s, mode)} />
             ) : (
-              <div className="chips">
-                {s.modes.map(m => <ModeChip key={m} mode={m} on={visits.has(key(s.id, m))} label={(visits.has(key(s.id, m)) ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />)}
+              <div className="toggles">
+                {s.modes.map(m => <ModeToggle key={m} mode={m} on={visits.has(key(s.id, m))} label={(visits.has(key(s.id, m)) ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />)}
               </div>
             )}
           </li>
@@ -294,9 +322,11 @@ function Home({ net, visits, collectedIn, onMode, onOpen, lang, t }: {
         {MODES.map(m => {
           const n = collectedIn(m), total = net.count[m];
           return (
-            <button key={m} className="card" onClick={() => onMode(m)} style={{ '--mode': MODE_COLOR[m] } as React.CSSProperties}>
-              <div className="card-head"><span className="mode-dot" />{t.modes[m]}</div>
-              <div className="card-num"><b>{n}</b> <span className="muted">/ {total}</span></div>
+            <button key={m} className="card" onClick={() => onMode(m)} aria-label={`${t.modes[m]}: ${n} ${t.of} ${total}`}>
+              <div className="card-head">
+                <ModeIcon mode={m} size={30} />
+                <div className="card-num"><b>{n}</b> <span className="muted">/ {total}</span></div>
+              </div>
               <Progress value={n} total={total} color={MODE_COLOR[m]} />
             </button>
           );
@@ -308,7 +338,7 @@ function Home({ net, visits, collectedIn, onMode, onOpen, lang, t }: {
           <ul className="list">
             {recent.map(({ s, m, d }) => (
               <li key={key(s.id, m)} className="row" onClick={() => onOpen(s)}>
-                <span className="mode-pill" style={{ background: MODE_COLOR[m] }}>{SHORT[m]}</span>
+                <ModeIcon mode={m} size={24} label={t.modes[m]} />
                 <div className="row-main"><div className="row-name">{s.name}</div></div>
                 <span className="muted small">{formatDate(d, lang)}</span>
               </li>
@@ -332,8 +362,10 @@ function ModePage({ net, mode, visits, collected, onLine, t }: {
   return (
     <>
       <section className="mode-head" style={{ '--mode': MODE_COLOR[mode] } as React.CSSProperties}>
-        <div className="mode-title">{t.modes[mode]}</div>
-        <div className="mode-num"><b>{collected}</b> {t.of} {net.count[mode]} {t.modeLong[mode]} {t.collected}</div>
+        <div className="mode-title">
+          <ModeIcon mode={mode} size={40} label={t.modes[mode]} />
+          <div className="mode-num"><b>{collected}</b> {t.of} {net.count[mode]} {t.modeLong[mode]} {t.collected}</div>
+        </div>
         <Progress value={collected} total={net.count[mode]} color={MODE_COLOR[mode]} />
       </section>
       <h2>{t.lines}</h2>
@@ -423,9 +455,9 @@ function Sheet({ title, onClose, children, closeLabel }: { title: React.ReactNod
   );
 }
 
-function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, lang, t }: {
+function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, t }: {
   station: Station; visits: Map<string, string>; onToggle: (s: Station, m: Mode) => void; onDate: (s: Station, m: Mode, d: string) => void;
-  onClose: () => void; onLine: (l: Line) => void; lang: Lang; t: T;
+  onClose: () => void; onLine: (l: Line) => void; t: T;
 }) {
   const osm = `https://www.openstreetmap.org/?mlat=${s.lat}&mlon=${s.lon}#map=17/${s.lat}/${s.lon}`;
   return (
@@ -436,12 +468,11 @@ function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, l
           const d = visits.get(key(s.id, m));
           return (
             <li key={m}>
-              <Check big on={!!d} color={MODE_COLOR[m]} label={(d ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />
+              <ModeToggle mode={m} size={36} on={!!d} label={(d ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />
               <div className="row-main">
-                <div className="row-name">{t.modes[m]}</div>
                 <div className="row-meta">
                   {d ? (
-                    <label className="date">{t.collectedOn('')}
+                    <label className="date">{t.collectedOn}
                       <input type="date" value={d} max={localToday()} onChange={e => e.target.value && onDate(s, m, e.target.value)} aria-label={t.date} />
                     </label>
                   ) : <span className="muted small">{t.notCollected}</span>}
@@ -461,64 +492,143 @@ function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, l
   );
 }
 
-function AccountSheet({ code, onClose, onChanged, t }: { code: string | null; onClose: () => void; onChanged: () => Promise<void>; t: T }) {
-  const [input, setInput] = useState('');
+function AccountSheet({ account, collected, lang, t, onClose, onChanged, onToast, onError }: {
+  account: Account | null; collected: number; lang: Lang; t: T;
+  onClose: () => void; onChanged: () => Promise<void>; onToast: (m: string) => void; onError: (e: unknown) => void;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const supported = useMemo(() => passkeysSupported(), []);
 
-  const login = async (e: React.FormEvent) => {
+  /** Run an account action: busy while it runs, its error shown here */
+  const run = async (what: string, fn: () => Promise<unknown>) => {
+    setBusy(what);
+    setMsg(null);
+    try { await fn(); } catch (e) {
+      if (cancelled(e)) return;
+      // the authenticator already holds a passkey of this account (excludeCredentials)
+      if (e instanceof Error && e.name === 'InvalidStateError') { setMsg(t.errors.passkey_exists); return; }
+      if (e instanceof ApiError && t.errors[e.code]) setMsg(t.errors[e.code]);
+      else onError(e);
+    } finally { setBusy(null); }
+  };
+
+  const create = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = input.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (clean.length !== 16) { setMsg(t.loginInvalid); return; }
-    setBusy(true);
-    try { await api.login(input); await onChanged(); onClose(); } catch (err) {
-      setMsg(err instanceof ApiError && err.status === 404 ? t.loginBad : err instanceof ApiError && err.status === 400 ? t.loginInvalid : t.error);
-    } finally { setBusy(false); }
+    run('create', async () => {
+      const r = await api.createAccount(name);
+      await onChanged();
+      onToast(t.accountCreated(r.account.name));
+      onClose();
+    });
   };
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(code!); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* */ }
+  const signIn = () => run('signin', async () => {
+    const r = await api.signIn();
+    await onChanged();
+    onToast(t.welcomeBack(r.account.name, r.merged));
+    onClose();
+  });
+  const addPasskey = () => run('add', async () => { await api.addPasskey(); await onChanged(); onToast(t.passkeyAdded); });
+  const removePasskey = (id: string) => {
+    if (!confirm(t.removePasskeyConfirm)) return;
+    run('remove', async () => { await api.removePasskey(id); await onChanged(); });
   };
-  const logout = async () => {
-    if (!confirm(t.logoutConfirm)) return;
-    try { await api.logout(); await onChanged(); onClose(); } catch { setMsg(t.error); }
+  const rename = (e: React.FormEvent) => {
+    e.preventDefault();
+    run('rename', async () => { await api.rename(name); await onChanged(); setRenaming(false); });
   };
-  const remove = async () => {
+  const logout = () => run('logout', async () => { await api.logout(); await onChanged(); onClose(); });
+  const remove = () => {
     if (!confirm(t.deleteConfirm)) return;
-    try { await api.deleteAccount(); await onChanged(); onClose(); } catch { setMsg(t.error); }
+    run('delete', async () => { await api.deleteAccount(); await onChanged(); onClose(); });
   };
+
+  const privacy = (
+    <>
+      <h4>{t.privacyTitle}</h4>
+      <ul className="privacy">{t.privacy.map(p => <li key={p} className="small">{p}</li>)}</ul>
+    </>
+  );
+
+  if (!account) return (
+    <Sheet title={t.account} onClose={onClose} closeLabel={t.close}>
+      <p className="muted">{t.accountWhy}</p>
+      {!supported ? <p className="notice">{t.noPasskeys}</p> : (
+        <>
+          {collected > 0 && <p className="small">{t.keepsCollection(collected)}</p>}
+          <button className="btn primary wide" onClick={signIn} disabled={!!busy}>
+            <PasskeyIcon /> {t.signInPasskey}
+          </button>
+          <form className="create" onSubmit={create}>
+            <h4>{t.newHere}</h4>
+            <div className="login-row">
+              <input value={name} onChange={e => { setName(e.target.value); setMsg(null); }} placeholder={t.namePlaceholder}
+                autoComplete="username webauthn" maxLength={30} aria-label={t.namePlaceholder} />
+              <button className="btn" disabled={!!busy || name.trim().length < 2}>{t.createAccount}</button>
+            </div>
+            <p className="muted small">{t.nameHint}</p>
+          </form>
+        </>
+      )}
+      {msg && <p className="error small">{msg}</p>}
+      {collected > 0 && (
+        <div className="danger">
+          <button className="link red" onClick={remove} disabled={!!busy}>{t.deleteCollection}</button>
+        </div>
+      )}
+      {privacy}
+    </Sheet>
+  );
 
   return (
     <Sheet title={t.account} onClose={onClose} closeLabel={t.close}>
-      <p className="muted">{t.accountIntro}</p>
-      {code ? (
-        <div className="code-box">
-          <span className="code-label">{t.yourCode}</span>
-          <code className="code">{code}</code>
-          <button className="btn small" onClick={copy}>{copied ? t.copied : t.copy}</button>
-        </div>
-      ) : <p className="notice">{t.noAccountYet}</p>}
+      <div className="who">
+        <span className="avatar big" aria-hidden="true">{account.name.slice(0, 1).toUpperCase()}</span>
+        {renaming ? (
+          <form className="login-row grow" onSubmit={rename}>
+            <input value={name} onChange={e => { setName(e.target.value); setMsg(null); }} maxLength={30} aria-label={t.namePlaceholder} autoFocus />
+            <button className="btn small primary" disabled={!!busy}>{t.save}</button>
+            <button type="button" className="btn small" onClick={() => setRenaming(false)}>{t.cancel}</button>
+          </form>
+        ) : (
+          <div className="grow">
+            <div className="muted small">{t.signedInAs}</div>
+            <div className="who-name">{account.name} <button className="link small" onClick={() => { setName(account.name); setRenaming(true); }}>{t.rename}</button></div>
+          </div>
+        )}
+      </div>
+      {msg && <p className="error small">{msg}</p>}
 
-      <form className="login" onSubmit={login}>
-        <h4>{t.loginTitle}</h4>
-        <p className="muted small">{t.loginHint}</p>
-        <div className="login-row">
-          <input value={input} onChange={e => { setInput(e.target.value); setMsg(null); }} placeholder="XXXX-XXXX-XXXX-XXXX"
-            autoCapitalize="characters" autoComplete="off" spellCheck={false} aria-label={t.yourCode} />
-          <button className="btn primary" disabled={busy}>{t.login}</button>
-        </div>
-        {msg && <p className="error small">{msg}</p>}
-      </form>
+      <h4>{t.passkeys}</h4>
+      <ul className="passkeys">
+        {account.passkeys.map(p => (
+          <li key={p.id}>
+            <PasskeyIcon />
+            <div className="grow small">
+              <div className="passkey-name">
+                {providerName(p.provider) ?? 'Passkey'}
+                {p.current && <span className="pill on">{t.currentPasskey}</span>}
+                {p.synced && <span className="pill">{t.synced}</span>}
+              </div>
+              <div className="muted">
+                {t.passkeyCreated(formatDate(p.createdAt, lang))}
+                {p.lastUsedAt && ` · ${t.passkeyUsed(formatDate(p.lastUsedAt, lang))}`}
+              </div>
+            </div>
+            {account.passkeys.length > 1 && <button className="link small red" onClick={() => removePasskey(p.id)} disabled={!!busy}>{t.remove}</button>}
+          </li>
+        ))}
+      </ul>
+      {supported && <button className="btn small" onClick={addPasskey} disabled={!!busy}><PasskeyIcon size={16} /> {t.addPasskey}</button>}
+      <p className="muted small">{t.addPasskeyHint}</p>
 
-      {code && (
-        <div className="danger">
-          <button className="link" onClick={logout}>{t.logout}</button>
-          <button className="link red" onClick={remove}>{t.deleteAccount}</button>
-        </div>
-      )}
-
-      <h4>{t.privacyTitle}</h4>
-      <ul className="privacy">{t.privacy.map(p => <li key={p} className="small">{p}</li>)}</ul>
+      <div className="danger">
+        <button className="link" onClick={logout} disabled={!!busy}>{t.logout}</button>
+        <button className="link red" onClick={remove} disabled={!!busy}>{t.deleteAccount}</button>
+      </div>
+      {privacy}
     </Sheet>
   );
 }
