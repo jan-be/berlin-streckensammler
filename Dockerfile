@@ -6,7 +6,8 @@ RUN bun install --frozen-lockfile
 COPY tsconfig.json ./
 COPY data ./data
 COPY src ./src
-RUN bun test && bun run build
+COPY scripts/smoke.ts ./scripts/smoke.ts
+RUN bun test && bun run build && bun scripts/smoke.ts
 
 # Run: only the bundle. The station data is inside server.js; the database
 # lives in /data (a volume).

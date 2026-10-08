@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun --hot src/server.ts",
-    "build": "rm -rf dist && bun build src/server.ts --target=bun --production --outdir=dist",
+    "build": "rm -rf dist && bun build src/server.ts --target=bun --production --public-path=/ --outdir=dist",
     "start": "bun dist/server.js",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
