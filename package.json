@@ -1,0 +1,23 @@
+{
+  "name": "berlin-streckensammler",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "build": "rm -rf dist && bun build src/server.ts --target=bun --production --outdir=dist",
+    "start": "bun dist/server.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "data": "bun scripts/build-data.ts"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}

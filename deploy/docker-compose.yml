@@ -1,0 +1,55 @@
+# The stack on the server (~/streckensammler/docker-compose.yml there).
+#
+# Traefik (in the main ~/docker-compose.yml) reaches the app over the internal
+# network streckensammler-edge, defined there; the app reaches nothing else
+# and needs no internet. Its own Watchtower checks GHCR every minute, so a
+# push to main is live a minute or two after CI finishes.
+services:
+  app:
+    image: ghcr.io/jan-be/berlin-streckensammler:latest
+    restart: always
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # the SQLite database (owned by uid 1000 = jan on the host)
+      - $HOME/docker_files/streckensammler:/data
+    networks:
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=streckensammler-edge
+      - traefik.http.routers.streckensammler.rule=Host(`berlin-streckensammler.janbe.eu`)
+      - traefik.http.routers.streckensammler.entrypoints=websecure
+      - traefik.http.routers.streckensammler.tls.certresolver=myresolver
+      - traefik.http.routers.streckensammler.middlewares=compress-mw@docker
+      - traefik.http.services.streckensammler.loadbalancer.server.port=3000
+      # only this stack's Watchtower updates it, at once
+      - com.centurylinklabs.watchtower.scope=streckensammler
+
+  # Deploys on push: polls GHCR for a new :latest of the app every 60 s.
+  watchtower:
+    image: nickfedor/watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # the server's GHCR login (the image is private, like the repo)
+      - $HOME/.docker/config.json:/config.json:ro
+    environment:
+      - WATCHTOWER_SCOPE=streckensammler
+      - WATCHTOWER_POLL_INTERVAL=60
+      - WATCHTOWER_CLEANUP=true
+      - TZ=Europe/Berlin
+    labels:
+      - traefik.enable=false
+      - com.centurylinklabs.watchtower.scope=streckensammler
+
+networks:
+  edge:
+    name: streckensammler-edge
+    external: true
