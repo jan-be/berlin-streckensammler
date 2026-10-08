@@ -223,7 +223,7 @@ export function App() {
 
       <footer className="foot">
         <p>{t.attribution(formatDate(net.feedDate, lang))}</p>
-        <p>{t.disclaimer}</p>
+        <p>{t.disclaimer} {t.signsCredit}</p>
         <p><button className="link" onClick={() => setLang(lang === 'de' ? 'en' : 'de')}>{t.language}</button> · <button className="link" onClick={() => setAccountOpen(true)}>{t.privacyTitle}</button></p>
       </footer>
 
@@ -351,8 +351,7 @@ function Home({ net, visits, collectedIn, onMode, onOpen, lang, t }: {
 }
 
 function lineCount(l: Line, visits: Map<string, string>) {
-  const all = [...l.main, ...l.more];
-  return { n: all.filter(s => visits.has(key(s.id, l.mode))).length, total: all.length };
+  return { n: l.all.filter(s => visits.has(key(s.id, l.mode))).length, total: l.all.length };
 }
 
 function ModePage({ net, mode, visits, collected, onLine, t }: {

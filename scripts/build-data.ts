@@ -275,7 +275,8 @@ const COLORS: Record<string, string> = {
   S1: '#DC6BA6', S15: '#DC6BA6', S2: '#007734', S25: '#007734', S26: '#007734', S3: '#0066AD', S41: '#A23B1E', S42: '#C26A36',
   S45: '#C38737', S46: '#C38737', S47: '#C38737', S5: '#EB7405', S7: '#816DA6', S75: '#816DA6', S8: '#66AA22', S85: '#66AA22', S9: '#992746',
 };
-const MODE_COLOR: Record<Mode, string> = { S: '#008D4F', U: '#115D91', T: '#C6202B', B: '#95276E', R: '#E2001A', F: '#0098D4' };
+// the colours of the modes' signs (src/client/signs), for lines without their own
+const MODE_COLOR: Record<Mode, string> = { S: '#008D4F', U: '#0664AB', T: '#D82020', B: '#A5027D', R: '#DA251D', F: '#0080BA' };
 
 type Line = { mode: Mode; name: string; color: string; main: string[]; more: string[] };
 const lines: Line[] = [];

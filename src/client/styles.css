@@ -53,7 +53,10 @@ main { flex: 1; }
 .top { display: flex; align-items: center; justify-content: space-between; padding: calc(12px + env(safe-area-inset-top)) 0 8px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; font-size: 1.15rem; letter-spacing: -0.01em; }
 .brand-mark { display: inline-flex; gap: 3px; }
-.mode-icon { flex: none; display: block; }
+.mode-icon { flex: none; display: inline-block; line-height: 0; }
+.mode-icon svg { display: block; width: 100%; height: 100%; }
+/* the regional diamond fills half its square: drawn a little larger so it weighs like the others */
+.sign-R svg { transform: scale(1.22); }
 .account-btn { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px 0 10px; border-radius: 19px; background: var(--surface); box-shadow: var(--shadow); font-weight: 600; font-size: 0.9rem; max-width: 45%; color: var(--text); }
 .account-btn.in { padding-left: 4px; }
 .account-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

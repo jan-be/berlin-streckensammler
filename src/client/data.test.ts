@@ -44,6 +44,12 @@ describe('data', () => {
     const alex = net.stations.find(s => s.name === 'S+U Alexanderplatz Bhf')!;
     expect(alex.lines.U!.map(l => l.name).sort()).toEqual(['U2', 'U5', 'U8']);
   });
+  test('a line passing a station twice lists and counts it once', () => {
+    const fr = net.stations.find(s => s.name === 'S+U Friedrichstr. Bhf')!;
+    const bus = fr.lines.B!.map(l => l.name);
+    expect(bus.length).toBe(new Set(bus).size);
+    for (const l of net.lines) expect(l.all.length).toBe(new Set(l.all).size);
+  });
   test('nearest to the TV tower is Alexanderplatz', () => {
     expect(nearest(net.stations, { lat: 52.5208, lon: 13.4094 }, 'U', 1)[0].s.name).toMatch(/Alexanderplatz/);
   });

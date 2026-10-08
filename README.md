@@ -62,4 +62,7 @@ within a minute. The database lives in `~/docker_files/streckensammler/app.db`.
 ## Data and credits
 
 Stop data: VBB Verkehrsverbund Berlin-Brandenburg GmbH, GTFS, licensed CC BY 4.0.
+Mode signs (`src/client/signs/`): Berlin's S-Bahn, U-Bahn, VBB regional, tram, BVG bus and ferry
+signs from Wikimedia Commons, all marked public domain there (S-Bahn-Logo.svg, U-Bahn Berlin logo.svg,
+VBB Bahn-Regionalverkehr.svg, Tram-Logo.svg, BUS-Logo-BVG.svg, Fähre-Logo-BVG.svg).
 A private project, not affiliated with BVG, S-Bahn Berlin, VBB or the "Streckensammler" app.

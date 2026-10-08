@@ -24,6 +24,8 @@ export type Line = {
   main: Station[];
   /** other stations it serves (branches, short workings) */
   more: Station[];
+  /** every station it serves, once (a loop passes some twice) */
+  all: Station[];
 };
 
 export type Network = {
@@ -50,8 +52,9 @@ export function decode(raw: Raw): Network {
   }));
   const lines: Line[] = raw.lines.map(([mode, name, color, main, more]) => ({
     id: `${mode}|${name}`, mode, name, color, main: main.map(i => stations[i]), more: more.map(i => stations[i]),
+    all: [...new Set([...main, ...more])].map(i => stations[i]),
   }));
-  for (const l of lines) for (const s of [...l.main, ...l.more]) (s.lines[l.mode] ??= []).push(l);
+  for (const l of lines) for (const s of l.all) (s.lines[l.mode] ??= []).push(l);
   const linesByMode = Object.fromEntries(MODES.map(m => [m, lines.filter(l => l.mode === m)])) as Record<Mode, Line[]>;
   const count = Object.fromEntries(MODES.map(m => [m, stations.filter(s => s.modes.includes(m)).length])) as Record<Mode, number>;
   return { feedDate: raw.feedDate, source: raw.source, stations, byId: new Map(stations.map(s => [s.id, s])), lines, linesByMode, count };
