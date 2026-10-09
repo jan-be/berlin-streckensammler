@@ -166,7 +166,7 @@ export function authRoutes({ store, me, token, json, error, body, cookie }: Ctx)
         const current = me(req);
         let merged = 0;
         if (current && !current.name && current.id !== key.userId) {
-          merged = store.countVisits(current.id);
+          merged = store.countEntries(current.id);
           store.mergeInto(current.id, key.userId);
         }
         return signIn(req, key.userId, key.id, { merged });

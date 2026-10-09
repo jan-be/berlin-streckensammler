@@ -1,21 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { decode, nearest, search, MODES, type Line, type Mode, type Network, type Station } from './data';
-import { api, ApiError, cancelled, localToday, passkeysSupported, type Account } from './api';
-import { STRINGS, formatDate, initialLang, type Lang, type T } from './i18n';
+import { api, ApiError, cancelled, localToday, passkeysSupported, type Account, type Entry } from './api';
+import { STRINGS, formatDate, formatMonth, initialLang, type Lang, type T } from './i18n';
 import { MODE_COLOR, ModeIcon, PasskeyIcon } from './icons';
 import { providerName } from './passkeyProviders';
 
 // ── routes ─────────────────────────────────────────────────────────────────
 const SLUG: Record<Mode, string> = { S: 's-bahn', U: 'u-bahn', R: 'regio', T: 'tram', B: 'bus', F: 'faehre' };
 const MODE_OF_SLUG = Object.fromEntries(Object.entries(SLUG).map(([m, s]) => [s, m])) as Record<string, Mode>;
-type Route = { mode: Mode | null; line: string | null };
+const JOURNAL = 'besuche';
+type Route = { mode: Mode | null; line: string | null; journal?: boolean };
 
 function parseRoute(path: string): Route {
   const [slug, line] = path.split('/').filter(Boolean).map(decodeURIComponent);
+  if (slug === JOURNAL) return { mode: null, line: null, journal: true };
   const mode = MODE_OF_SLUG[slug] ?? null;
   return { mode, line: mode && line ? line : null };
 }
-const routePath = (r: Route) => (r.mode ? `/${SLUG[r.mode]}${r.line ? `/${encodeURIComponent(r.line)}` : ''}` : '/');
+const routePath = (r: Route) =>
+  r.journal ? `/${JOURNAL}` : r.mode ? `/${SLUG[r.mode]}${r.line ? `/${encodeURIComponent(r.line)}` : ''}` : '/';
 
 const key = (station: string, mode: Mode) => `${station}|${mode}`;
 
@@ -30,27 +33,45 @@ const BANNER_KEY = 'saveBannerDismissed';
 const readFlag = (k: string) => { try { return localStorage.getItem(k) === '1'; } catch { return false; } };
 const setFlag = (k: string) => { try { localStorage.setItem(k, '1'); } catch { /* */ } };
 
+/** What the journal says about each station and mode: collected since when, how often */
+type Collected = Map<string, { first: string; count: number }>;
+function collectedFrom(entries: Entry[]): Collected {
+  const m: Collected = new Map();
+  for (const e of entries) {
+    const k = key(e.station, e.mode);
+    const c = m.get(k);
+    if (!c) m.set(k, { first: e.date, count: 1 });
+    else { c.count++; if (e.date < c.first) c.first = e.date; }
+  }
+  return m;
+}
+const byNewest = (a: Entry, b: Entry) => b.date.localeCompare(a.date) || b.id - a.id;
+
+type Toast = { text: string; actions?: { label: string; run: () => void }[] };
+type SheetState = { station: Station; mode?: Mode; edit?: number };
+
 // ── app ────────────────────────────────────────────────────────────────────
 export function App() {
   const [lang, setLang] = useState<Lang>(initialLang);
   const t = STRINGS[lang];
   const [net, setNet] = useState<Network | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const [visits, setVisits] = useState<Map<string, string>>(new Map());
+  const [entries, setEntries] = useState<Entry[]>([]);
   const [account, setAccount] = useState<Account | null>(null);
   const [route, setRoute] = useState<Route>(() => parseRoute(location.pathname));
   const [query, setQuery] = useState('');
   const [near, setNear] = useState<{ status: 'loading' | 'denied' | 'unavailable' | 'ok'; at?: { lat: number; lon: number } } | null>(null);
-  const [sheet, setSheet] = useState<Station | null>(null);
+  const [sheet, setSheet] = useState<SheetState | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const [bannerGone, setBannerGone] = useState(() => readFlag(BANNER_KEY));
+  const collected = useMemo(() => collectedFrom(entries), [entries]);
 
   useEffect(() => { document.documentElement.lang = lang; try { localStorage.setItem('lang', lang); } catch { /* */ } }, [lang]);
 
   const loadMe = useCallback(async () => {
     const me = await api.me();
-    setVisits(new Map(me.visits.map(([s, m, d]) => [key(s, m), d])));
+    setEntries(me.entries);
     setAccount(me.account);
   }, []);
   const load = useCallback(async () => {
@@ -79,39 +100,67 @@ export function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const id = setTimeout(() => setToast(null), 3500);
+    const id = setTimeout(() => setToast(null), toast.actions ? 6000 : 3500);
     return () => clearTimeout(id);
   }, [toast]);
+  const say = useCallback((text: string) => setToast({ text }), []);
 
   const fail = useCallback((e: unknown) => {
     if (cancelled(e)) return;
-    if (e instanceof ApiError) setToast(e.status === 0 ? t.offline : t.errors[e.code] ?? t.error);
-    else setToast(t.error);
-  }, [t]);
+    if (e instanceof ApiError) say(e.status === 0 ? t.offline : t.errors[e.code] ?? t.error);
+    else say(t.error);
+  }, [t, say]);
 
-  /** Collect or drop a station in a mode: shown at once, undone if the server says no */
-  const toggle = useCallback(async (s: Station, mode: Mode) => {
-    const k = key(s.id, mode);
-    const had = visits.get(k);
-    setVisits(v => { const n = new Map(v); had ? n.delete(k) : n.set(k, localToday()); return n; });
+  // ── the journal: shown at once, put right if the server says no ─────────
+  const logVisit = useCallback(async (s: Station, mode: Mode, opts: { date?: string; note?: string | null } = {}) => {
+    const temp: Entry = { id: -Date.now(), station: s.id, mode, date: opts.date ?? localToday(), note: opts.note || null };
+    setEntries(es => [temp, ...es]);
     try {
-      if (had) await api.uncollect(s.id, mode);
-      else await api.collect(s.id, mode);
+      const saved = await api.addEntry(s.id, mode, opts);
+      setEntries(es => es.map(e => (e.id === temp.id ? saved : e)));
+      return saved;
     } catch (e) {
-      setVisits(v => { const n = new Map(v); had ? n.set(k, had) : n.delete(k); return n; });
+      setEntries(es => es.filter(x => x.id !== temp.id));
       fail(e);
+      return null;
     }
-  }, [visits, fail]);
+  }, [fail]);
 
-  const setDate = useCallback(async (s: Station, mode: Mode, date: string) => {
-    const k = key(s.id, mode);
-    const before = visits.get(k);
-    setVisits(v => new Map(v).set(k, date));
-    try { await api.collect(s.id, mode, date); } catch (e) {
-      setVisits(v => { const n = new Map(v); before ? n.set(k, before) : n.delete(k); return n; });
+  const updateEntry = useCallback(async (id: number, patch: { date: string; note: string | null }) => {
+    const before = entries.find(e => e.id === id);
+    setEntries(es => es.map(e => (e.id === id ? { ...e, ...patch, note: patch.note || null } : e)));
+    try { await api.updateEntry(id, patch); } catch (e) {
+      if (before) setEntries(es => es.map(x => (x.id === id ? before : x)));
       fail(e);
     }
-  }, [visits, fail]);
+  }, [entries, fail]);
+
+  const removeEntry = useCallback(async (id: number) => {
+    const before = entries.find(e => e.id === id);
+    setEntries(es => es.filter(e => e.id !== id));
+    try { await api.deleteEntry(id); } catch (e) {
+      if (before) setEntries(es => [before, ...es]);
+      fail(e);
+    }
+  }, [entries, fail]);
+
+  /**
+   * A tap on a station's sign: not visited yet in that mode → log a visit now
+   * (with Undo and a way to add a note); visited → open the station, where its
+   * visits are, so a stray tap never deletes anything.
+   */
+  const quickTap = useCallback(async (s: Station, mode: Mode) => {
+    if (collected.has(key(s.id, mode))) { setSheet({ station: s, mode }); return; }
+    const saved = await logVisit(s, mode);
+    if (!saved) return;
+    setToast({
+      text: t.logged(`${s.name} · ${t.modes[mode]}`),
+      actions: [
+        { label: t.undo, run: () => removeEntry(saved.id) },
+        { label: t.addNote, run: () => setSheet({ station: s, mode, edit: saved.id }) },
+      ],
+    });
+  }, [collected, logVisit, removeEntry, t]);
 
   const findNearby = useCallback(() => {
     if (!('geolocation' in navigator)) { setNear({ status: 'unavailable' }); return; }
@@ -127,9 +176,9 @@ export function App() {
   const collectedIn = useCallback((m: Mode) => {
     if (!net) return 0;
     let n = 0;
-    for (const k of visits.keys()) if (k.endsWith(`|${m}`) && net.byId.has(k.slice(0, -2))) n++;
+    for (const k of collected.keys()) if (k.endsWith(`|${m}`) && net.byId.has(k.slice(0, -2))) n++;
     return n;
-  }, [visits, net]);
+  }, [collected, net]);
 
   if (loadError) return (
     <div className="center-msg">
@@ -143,7 +192,9 @@ export function App() {
   const line = route.line ? net.linesByMode[route.mode!]?.find(l => l.name === route.line) ?? null : null;
   const results = query.trim() ? search(net.stations, query, mode) : null;
   const nearby = near?.status === 'ok' && near.at ? nearest(net.stations, near.at, mode) : null;
-  const showBanner = !account && !bannerGone && visits.size >= 3 && !mode && !results && !near;
+  const showBanner = !account && !bannerGone && entries.length >= 3 && !mode && !route.journal && !results && !near;
+  const openStation = (s: Station) => setSheet({ station: s });
+  const list = { collected, onTap: quickTap, onOpen: openStation, t };
 
   return (
     <div className="app">
@@ -191,7 +242,7 @@ export function App() {
         {showBanner && (
           <div className="banner">
             <PasskeyIcon size={22} />
-            <div className="banner-text">{t.saveBanner(visits.size)}</div>
+            <div className="banner-text">{t.saveBanner(entries.length)}</div>
             <div className="banner-actions">
               <button className="btn small primary" onClick={() => setAccountOpen(true)}>{t.saveBannerAction}</button>
               <button className="link small" onClick={() => { setFlag(BANNER_KEY); setBannerGone(true); }}>{t.later}</button>
@@ -199,7 +250,7 @@ export function App() {
           </div>
         )}
         {results ? (
-          <StationList stations={results} mode={mode} visits={visits} onToggle={toggle} onOpen={setSheet} t={t} empty={t.noResults} />
+          <StationList stations={results} mode={mode} {...list} empty={t.noResults} />
         ) : near ? (
           <section>
             {near.status === 'loading' && <p className="muted pad">{t.nearbyLoading}</p>}
@@ -207,17 +258,20 @@ export function App() {
             {near.status === 'unavailable' && <p className="notice">{t.nearbyUnavailable}</p>}
             {nearby && (
               <>
-                <StationList stations={nearby.map(n => n.s)} distances={nearby.map(n => n.d)} mode={mode} visits={visits} onToggle={toggle} onOpen={setSheet} t={t} empty={t.noResults} />
+                <StationList stations={nearby.map(n => n.s)} distances={nearby.map(n => n.d)} mode={mode} {...list} empty={t.noResults} />
                 <p className="muted small pad">{t.nearbyNote}</p>
               </>
             )}
           </section>
+        ) : route.journal ? (
+          <JournalPage net={net} entries={entries} onOpen={openStation} onBack={() => go({ mode: null, line: null })} lang={lang} t={t} />
         ) : line ? (
-          <LinePage line={line} visits={visits} onToggle={toggle} onOpen={setSheet} onBack={() => go({ mode: line.mode, line: null })} t={t} />
+          <LinePage line={line} {...list} onBack={() => go({ mode: line.mode, line: null })} />
         ) : mode ? (
-          <ModePage net={net} mode={mode} visits={visits} collected={collectedIn(mode)} onLine={l => go({ mode, line: l.name })} t={t} />
+          <ModePage net={net} mode={mode} collected={collected} count={collectedIn(mode)} onLine={l => go({ mode, line: l.name })} t={t} />
         ) : (
-          <Home net={net} visits={visits} collectedIn={collectedIn} onMode={m => go({ mode: m, line: null })} onOpen={setSheet} lang={lang} t={t} />
+          <Home net={net} entries={entries} collectedIn={collectedIn} onMode={m => go({ mode: m, line: null })}
+            onOpen={openStation} onJournal={() => go({ mode: null, line: null, journal: true })} lang={lang} t={t} />
         )}
       </main>
 
@@ -227,12 +281,23 @@ export function App() {
         <p><button className="link" onClick={() => setLang(lang === 'de' ? 'en' : 'de')}>{t.language}</button> · <button className="link" onClick={() => setAccountOpen(true)}>{t.privacyTitle}</button></p>
       </footer>
 
-      {sheet && <StationSheet station={sheet} visits={visits} onToggle={toggle} onDate={setDate} onClose={() => setSheet(null)} onLine={l => { setSheet(null); go({ mode: l.mode, line: l.name }); }} t={t} />}
-      {accountOpen && (
-        <AccountSheet account={account} collected={visits.size} lang={lang} t={t}
-          onClose={() => setAccountOpen(false)} onChanged={loadMe} onToast={setToast} onError={fail} />
+      {sheet && (
+        <StationSheet key={sheet.station.id} station={sheet.station} initialMode={sheet.mode} initialEdit={sheet.edit}
+          entries={entries} onLog={logVisit} onUpdate={updateEntry} onDelete={removeEntry}
+          onClose={() => setSheet(null)} onLine={l => { setSheet(null); go({ mode: l.mode, line: l.name }); }} lang={lang} t={t} />
       )}
-      {toast && <div className="toast" role="status">{toast}</div>}
+      {accountOpen && (
+        <AccountSheet account={account} collected={entries.length} lang={lang} t={t}
+          onClose={() => setAccountOpen(false)} onChanged={loadMe} onToast={say} onError={fail} />
+      )}
+      {toast && (
+        <div className="toast" role="status">
+          <span>{toast.text}</span>
+          {toast.actions?.map(a => (
+            <button key={a.label} className="toast-action" onClick={() => { setToast(null); a.run(); }}>{a.label}</button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -245,29 +310,41 @@ export function LineBadge({ line, small }: { line: Line; small?: boolean }) {
   );
 }
 
-function Check({ on, color, label, onClick, big }: { on: boolean; color: string; label: string; onClick: () => void; big?: boolean }) {
+/** The label of a station's sign or circle: log it, or (visited) open it */
+const tapLabel = (t: T, s: Station, mode: Mode, modeName: string, c: Collected) => {
+  const got = c.get(key(s.id, mode));
+  return got ? t.collectedOpen(s.name, modeName, got.count) : t.collect(s.name, modeName);
+};
+
+function Check({ on, color, label, onClick, big, count }: { on: boolean; color: string; label: string; onClick: () => void; big?: boolean; count?: number }) {
   return (
     <button className={`check ${on ? 'on' : ''} ${big ? 'big' : ''}`} style={{ '--c': color } as React.CSSProperties}
-      aria-pressed={on} aria-label={label} title={label} onClick={e => { e.stopPropagation(); onClick(); }}>
-      {on && <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+      aria-label={label} title={label} onClick={e => { e.stopPropagation(); onClick(); }}>
+      {on && (count && count > 1
+        ? <span className="check-count" aria-hidden="true">{count}</span>
+        : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>)}
     </button>
   );
 }
 
-/** A mode's sign as a toggle: grey until collected, then in colour with a tick */
-function ModeToggle({ mode, on, label, onClick, size = 30 }: { mode: Mode; on: boolean; label: string; onClick: () => void; size?: number }) {
+/** A mode's sign as a button: grey until visited, then in colour with a tick (or how many times) */
+function ModeToggle({ mode, on, count, label, onClick, size = 30 }: { mode: Mode; on: boolean; count?: number; label: string; onClick: () => void; size?: number }) {
   return (
-    <button className={`mode-toggle ${on ? 'on' : ''}`} aria-pressed={on} aria-label={label} title={label}
+    <button className={`mode-toggle ${on ? 'on' : ''}`} aria-label={label} title={label}
       onClick={e => { e.stopPropagation(); onClick(); }}>
       <ModeIcon mode={mode} size={size} />
-      {on && <span className="tick" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" /></svg></span>}
+      {on && (
+        <span className="tick" aria-hidden="true">
+          {count && count > 1 ? count : <svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+        </span>
+      )}
     </button>
   );
 }
 
-function StationList({ stations, distances, mode, visits, onToggle, onOpen, t, empty }: {
-  stations: Station[]; distances?: number[]; mode: Mode | null; visits: Map<string, string>;
-  onToggle: (s: Station, m: Mode) => void; onOpen: (s: Station) => void; t: T; empty: string;
+function StationList({ stations, distances, mode, collected, onTap, onOpen, t, empty }: {
+  stations: Station[]; distances?: number[]; mode: Mode | null; collected: Collected;
+  onTap: (s: Station, m: Mode) => void; onOpen: (s: Station) => void; t: T; empty: string;
 }) {
   if (!stations.length) return <p className="muted pad">{empty}</p>;
   return (
@@ -290,10 +367,14 @@ function StationList({ stations, distances, mode, visits, onToggle, onOpen, t, e
               </div>
             </div>
             {mode ? (
-              <Check big on={visits.has(key(s.id, mode))} color={MODE_COLOR[mode]} label={(visits.has(key(s.id, mode)) ? t.uncollect : t.collect)(s.name, t.modes[mode])} onClick={() => onToggle(s, mode)} />
+              <Check big on={collected.has(key(s.id, mode))} count={collected.get(key(s.id, mode))?.count} color={MODE_COLOR[mode]}
+                label={tapLabel(t, s, mode, t.modes[mode], collected)} onClick={() => onTap(s, mode)} />
             ) : (
               <div className="toggles">
-                {s.modes.map(m => <ModeToggle key={m} mode={m} on={visits.has(key(s.id, m))} label={(visits.has(key(s.id, m)) ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />)}
+                {s.modes.map(m => (
+                  <ModeToggle key={m} mode={m} on={collected.has(key(s.id, m))} count={collected.get(key(s.id, m))?.count}
+                    label={tapLabel(t, s, m, t.modes[m], collected)} onClick={() => onTap(s, m)} />
+                ))}
               </div>
             )}
           </li>
@@ -308,14 +389,26 @@ function Progress({ value, total, color }: { value: number; total: number; color
   return <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={value}><span style={{ width: `${pct}%`, background: color }} /></div>;
 }
 
-function Home({ net, visits, collectedIn, onMode, onOpen, lang, t }: {
-  net: Network; visits: Map<string, string>; collectedIn: (m: Mode) => number; onMode: (m: Mode) => void; onOpen: (s: Station) => void; lang: Lang; t: T;
+/** One journal line: the mode's sign, the station, the day, the note */
+function EntryRow({ e, s, onOpen, lang, t, withDate = true }: { e: Entry; s: Station; onOpen: (s: Station) => void; lang: Lang; t: T; withDate?: boolean }) {
+  return (
+    <li className="row entry-row" onClick={() => onOpen(s)}>
+      <ModeIcon mode={e.mode} size={24} label={t.modes[e.mode]} />
+      <div className="row-main">
+        <div className="row-name">{s.name}</div>
+        {e.note && <div className="entry-note">{e.note}</div>}
+      </div>
+      {withDate && <span className="muted small nowrap">{formatDate(e.date, lang)}</span>}
+    </li>
+  );
+}
+
+function Home({ net, entries, collectedIn, onMode, onOpen, onJournal, lang, t }: {
+  net: Network; entries: Entry[]; collectedIn: (m: Mode) => number; onMode: (m: Mode) => void;
+  onOpen: (s: Station) => void; onJournal: () => void; lang: Lang; t: T;
 }) {
-  const recent = useMemo(() => [...visits.entries()]
-    .map(([k, d]) => ({ s: net.byId.get(k.slice(0, -2)), m: k.slice(-1) as Mode, d }))
-    .filter((v): v is { s: Station; m: Mode; d: string } => !!v.s)
-    .sort((a, b) => b.d.localeCompare(a.d))
-    .slice(0, 12), [visits, net]);
+  const recent = useMemo(() => [...entries].sort(byNewest).filter(e => net.byId.has(e.station)).slice(0, 8), [entries, net]);
+  const stations = useMemo(() => new Set(entries.map(e => e.station)).size, [entries]);
   return (
     <>
       <section className="cards">
@@ -334,28 +427,57 @@ function Home({ net, visits, collectedIn, onMode, onOpen, lang, t }: {
       </section>
       {recent.length ? (
         <section>
-          <h2>{t.recent}</h2>
+          <div className="section-head">
+            <h2>{t.recent}</h2>
+            <span className="muted small">{t.summary(entries.length, stations)}</span>
+          </div>
           <ul className="list">
-            {recent.map(({ s, m, d }) => (
-              <li key={key(s.id, m)} className="row" onClick={() => onOpen(s)}>
-                <ModeIcon mode={m} size={24} label={t.modes[m]} />
-                <div className="row-main"><div className="row-name">{s.name}</div></div>
-                <span className="muted small">{formatDate(d, lang)}</span>
-              </li>
-            ))}
+            {recent.map(e => <EntryRow key={e.id} e={e} s={net.byId.get(e.station)!} onOpen={onOpen} lang={lang} t={t} />)}
           </ul>
+          {entries.length > recent.length && <button className="more-link" onClick={onJournal}>{t.journal} ›</button>}
         </section>
       ) : <p className="hint">{t.emptyHint}</p>}
     </>
   );
 }
 
-function lineCount(l: Line, visits: Map<string, string>) {
-  return { n: l.all.filter(s => visits.has(key(s.id, l.mode))).length, total: l.all.length };
+/** Every visit, newest first, by month */
+function JournalPage({ net, entries, onOpen, onBack, lang, t }: {
+  net: Network; entries: Entry[]; onOpen: (s: Station) => void; onBack: () => void; lang: Lang; t: T;
+}) {
+  const months = useMemo(() => {
+    const out: { month: string; items: Entry[] }[] = [];
+    for (const e of [...entries].sort(byNewest)) {
+      if (!net.byId.has(e.station)) continue;
+      const m = e.date.slice(0, 7);
+      if (out[out.length - 1]?.month !== m) out.push({ month: m, items: [] });
+      out[out.length - 1].items.push(e);
+    }
+    return out;
+  }, [entries, net]);
+  return (
+    <>
+      <button className="back" onClick={onBack}>‹ {t.back}</button>
+      <h1 className="page-title">{t.journal}</h1>
+      {months.length === 0 && <p className="hint">{t.noVisits}</p>}
+      {months.map(({ month, items }) => (
+        <section key={month}>
+          <h2>{formatMonth(`${month}-01`, lang)}</h2>
+          <ul className="list">
+            {items.map(e => <EntryRow key={e.id} e={e} s={net.byId.get(e.station)!} onOpen={onOpen} lang={lang} t={t} />)}
+          </ul>
+        </section>
+      ))}
+    </>
+  );
 }
 
-function ModePage({ net, mode, visits, collected, onLine, t }: {
-  net: Network; mode: Mode; visits: Map<string, string>; collected: number; onLine: (l: Line) => void; t: T;
+function lineCount(l: Line, collected: Collected) {
+  return { n: l.all.filter(s => collected.has(key(s.id, l.mode))).length, total: l.all.length };
+}
+
+function ModePage({ net, mode, collected, count, onLine, t }: {
+  net: Network; mode: Mode; collected: Collected; count: number; onLine: (l: Line) => void; t: T;
 }) {
   const lines = net.linesByMode[mode];
   return (
@@ -363,14 +485,14 @@ function ModePage({ net, mode, visits, collected, onLine, t }: {
       <section className="mode-head" style={{ '--mode': MODE_COLOR[mode] } as React.CSSProperties}>
         <div className="mode-title">
           <ModeIcon mode={mode} size={40} label={t.modes[mode]} />
-          <div className="mode-num"><b>{collected}</b> {t.of} {net.count[mode]} {t.modeLong[mode]} {t.collected}</div>
+          <div className="mode-num"><b>{count}</b> {t.of} {net.count[mode]} {t.modeLong[mode]} {t.collected}</div>
         </div>
-        <Progress value={collected} total={net.count[mode]} color={MODE_COLOR[mode]} />
+        <Progress value={count} total={net.count[mode]} color={MODE_COLOR[mode]} />
       </section>
       <h2>{t.lines}</h2>
       <ul className="list">
         {lines.map(l => {
-          const { n, total } = lineCount(l, visits);
+          const { n, total } = lineCount(l, collected);
           const first = l.main[0]?.name, last = l.main[l.main.length - 1]?.name;
           return (
             <li key={l.id} className="row line-row" onClick={() => onLine(l)}>
@@ -388,17 +510,17 @@ function ModePage({ net, mode, visits, collected, onLine, t }: {
   );
 }
 
-function LinePage({ line, visits, onToggle, onOpen, onBack, t }: {
-  line: Line; visits: Map<string, string>; onToggle: (s: Station, m: Mode) => void; onOpen: (s: Station) => void; onBack: () => void; t: T;
+function LinePage({ line, collected, onTap, onOpen, onBack, t }: {
+  line: Line; collected: Collected; onTap: (s: Station, m: Mode) => void; onOpen: (s: Station) => void; onBack: () => void; t: T;
 }) {
-  const { n, total } = lineCount(line, visits);
+  const { n, total } = lineCount(line, collected);
   const stop = (s: Station, i: number, arr: Station[]) => {
-    const on = visits.has(key(s.id, line.mode));
+    const got = collected.get(key(s.id, line.mode));
     const others = (s.lines[line.mode] ?? []).filter(l => l.id !== line.id);
     return (
-      <li key={s.id} className={`stop ${on ? 'on' : ''} ${i === 0 ? 'first' : ''} ${i === arr.length - 1 ? 'last' : ''}`} onClick={() => onOpen(s)}>
+      <li key={`${s.id}-${i}`} className={`stop ${got ? 'on' : ''} ${i === 0 ? 'first' : ''} ${i === arr.length - 1 ? 'last' : ''}`} onClick={() => onOpen(s)}>
         <span className="track" aria-hidden="true" />
-        <Check on={on} color={line.color} label={(on ? t.uncollect : t.collect)(s.name, line.name)} onClick={() => onToggle(s, line.mode)} />
+        <Check on={!!got} count={got?.count} color={line.color} label={tapLabel(t, s, line.mode, line.name, collected)} onClick={() => onTap(s, line.mode)} />
         <div className="row-main">
           <div className="row-name">{s.name}</div>
           {(others.length > 0 || s.note) && (
@@ -454,31 +576,51 @@ function Sheet({ title, onClose, children, closeLabel }: { title: React.ReactNod
   );
 }
 
-function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, t }: {
-  station: Station; visits: Map<string, string>; onToggle: (s: Station, m: Mode) => void; onDate: (s: Station, m: Mode, d: string) => void;
-  onClose: () => void; onLine: (l: Line) => void; t: T;
+/**
+ * A station: per mode how often and since when, a form to log a visit with a
+ * note, and every visit here (edit its day or note, or delete it).
+ */
+function StationSheet({ station: s, initialMode, initialEdit, entries, onLog, onUpdate, onDelete, onClose, onLine, lang, t }: {
+  station: Station; initialMode?: Mode; initialEdit?: number; entries: Entry[];
+  onLog: (s: Station, m: Mode, opts: { date?: string; note?: string | null }) => Promise<Entry | null>;
+  onUpdate: (id: number, patch: { date: string; note: string | null }) => void; onDelete: (id: number) => void;
+  onClose: () => void; onLine: (l: Line) => void; lang: Lang; t: T;
 }) {
+  const here = useMemo(() => entries.filter(e => e.station === s.id).sort(byNewest), [entries, s.id]);
+  const [mode, setMode] = useState<Mode>(initialMode && s.modes.includes(initialMode) ? initialMode : s.modes[0]);
+  const [date, setDate] = useState(localToday());
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<number | null>(initialEdit ?? null);
   const osm = `https://www.openstreetmap.org/?mlat=${s.lat}&mlon=${s.lon}#map=17/${s.lat}/${s.lon}`;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const saved = await onLog(s, mode, { date, note: note.trim() || null });
+    setBusy(false);
+    // ready for the next one: no note, today
+    if (saved) { setNote(''); setDate(localToday()); }
+  };
+
   return (
     <Sheet title={s.name} onClose={onClose} closeLabel={t.close}>
       {s.note && <p className="note block">{t.closedNote[s.note] ?? s.note}</p>}
       <ul className="sheet-modes">
         {s.modes.map(m => {
-          const d = visits.get(key(s.id, m));
+          const mine = here.filter(e => e.mode === m);
+          const first = mine.reduce<string | null>((a, e) => (!a || e.date < a ? e.date : a), null);
           return (
-            <li key={m}>
-              <ModeToggle mode={m} size={36} on={!!d} label={(d ? t.uncollect : t.collect)(s.name, t.modes[m])} onClick={() => onToggle(s, m)} />
+            <li key={m} className={m === mode ? 'chosen' : ''} onClick={() => setMode(m)}>
+              <ModeToggle mode={m} size={34} on={mine.length > 0} count={mine.length} label={t.modes[m]} onClick={() => setMode(m)} />
               <div className="row-main">
-                <div className="row-meta">
-                  {d ? (
-                    <label className="date">{t.collectedOn}
-                      <input type="date" value={d} max={localToday()} onChange={e => e.target.value && onDate(s, m, e.target.value)} aria-label={t.date} />
-                    </label>
-                  ) : <span className="muted small">{t.notCollected}</span>}
+                <div className="small">
+                  {mine.length ? <><b>{t.visitsCount(mine.length)}</b> <span className="muted">· {t.firstVisit(formatDate(first!, lang))}</span></>
+                    : <span className="muted">{t.notCollected}</span>}
                 </div>
                 {(s.lines[m] ?? []).length > 0 && (
                   <div className="row-meta wrap">
-                    {(s.lines[m] ?? []).map(l => <button key={l.id} className="badge-btn" onClick={() => onLine(l)}><LineBadge line={l} small /></button>)}
+                    {(s.lines[m] ?? []).map(l => <button key={l.id} className="badge-btn" onClick={e => { e.stopPropagation(); onLine(l); }}><LineBadge line={l} small /></button>)}
                   </div>
                 )}
               </div>
@@ -486,8 +628,74 @@ function StationSheet({ station: s, visits, onToggle, onDate, onClose, onLine, t
           );
         })}
       </ul>
+
+      <form className="log-form" onSubmit={submit}>
+        <h4>{t.logVisit}</h4>
+        <div className="log-row">
+          {s.modes.length > 1 && (
+            <div className="mode-pick" role="radiogroup" aria-label={t.logVisit}>
+              {s.modes.map(m => (
+                <button type="button" key={m} role="radio" aria-checked={m === mode} aria-label={t.modes[m]} title={t.modes[m]}
+                  className={`mode-choice ${m === mode ? 'on' : ''}`} onClick={() => setMode(m)}>
+                  <ModeIcon mode={m} size={26} />
+                </button>
+              ))}
+            </div>
+          )}
+          <input type="date" value={date} max={localToday()} onChange={e => e.target.value && setDate(e.target.value)} aria-label={t.date} />
+        </div>
+        <textarea value={note} onChange={e => setNote(e.target.value)} placeholder={t.notePlaceholder} maxLength={500} rows={2} aria-label={t.notePlaceholder} />
+        <button className="btn primary" disabled={busy}>{t.logIt}</button>
+      </form>
+
+      {here.length > 0 && (
+        <>
+          <h4>{t.visitsTitle}</h4>
+          <ul className="visits">
+            {here.map(e => editing === e.id
+              ? <EntryEditor key={e.id} e={e} onSave={patch => { onUpdate(e.id, patch); setEditing(null); }}
+                  onDelete={() => { if (confirm(t.deleteVisitConfirm)) { onDelete(e.id); setEditing(null); } }}
+                  onCancel={() => setEditing(null)} t={t} />
+              : (
+                <li key={e.id} className="visit" onClick={() => setEditing(e.id)}>
+                  <ModeIcon mode={e.mode} size={20} label={t.modes[e.mode]} />
+                  <div className="row-main">
+                    <div className="small"><b>{formatDate(e.date, lang)}</b></div>
+                    <div className={e.note ? 'entry-note' : 'muted small'}>{e.note ?? t.noNote}</div>
+                  </div>
+                  <button className="link small" onClick={ev => { ev.stopPropagation(); setEditing(e.id); }}>{t.edit}</button>
+                </li>
+              ))}
+          </ul>
+        </>
+      )}
       <p><a href={osm} target="_blank" rel="noopener noreferrer">{t.showOnMap} ↗</a></p>
     </Sheet>
+  );
+}
+
+function EntryEditor({ e, onSave, onDelete, onCancel, t }: {
+  e: Entry; onSave: (patch: { date: string; note: string | null }) => void; onDelete: () => void; onCancel: () => void; t: T;
+}) {
+  const [date, setDate] = useState(e.date);
+  const [note, setNote] = useState(e.note ?? '');
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  return (
+    <li className="visit editing">
+      <form className="edit-form" onSubmit={ev => { ev.preventDefault(); onSave({ date, note: note.trim() || null }); }}>
+        <div className="log-row">
+          <ModeIcon mode={e.mode} size={24} label={t.modes[e.mode]} />
+          <input type="date" value={date} max={localToday()} onChange={ev => ev.target.value && setDate(ev.target.value)} aria-label={t.date} />
+        </div>
+        <textarea ref={ref} value={note} onChange={ev => setNote(ev.target.value)} placeholder={t.notePlaceholder} maxLength={500} rows={3} aria-label={t.notePlaceholder} />
+        <div className="edit-actions">
+          <button className="btn small primary">{t.save}</button>
+          <button type="button" className="btn small" onClick={onCancel}>{t.cancel}</button>
+          <button type="button" className="link small red" onClick={onDelete}>{t.delete}</button>
+        </div>
+      </form>
+    </li>
   );
 }
 

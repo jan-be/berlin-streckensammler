@@ -1,5 +1,7 @@
 /**
- * The app's only state: who collected which station in which mode, and when.
+ * The app's only state: who was at which station, in which mode, when, and
+ * (optionally) what they did there. Every visit is its own entry; a station
+ * counts as collected in a mode from its first.
  *
  * Collecting needs no account: the first station collected creates an
  * anonymous user with a session cookie for this browser. Creating an account
@@ -13,7 +15,9 @@ import { dirname, resolve } from 'path';
 
 export type Mode = 'S' | 'U' | 'R' | 'T' | 'B' | 'F';
 export const MODES: Mode[] = ['S', 'U', 'R', 'T', 'B', 'F'];
-export type Visit = { station: string; mode: Mode; date: string };
+/** One visit of a station in a mode: a journal entry */
+export type Entry = { id: number; station: string; mode: Mode; date: string; note: string | null };
+export const NOTE_MAX = 500;
 export type User = { id: number; name: string | null; handle: string | null; passkeyId?: string | null };
 export type Passkey = {
   id: string; userId: number; publicKey: Uint8Array; counter: number; transports: string[];
@@ -86,6 +90,20 @@ const MIGRATIONS: string[] = [
    CREATE INDEX passkeys_user ON passkeys(user_id);
    -- which passkey signed this session in (shown as the current one)
    ALTER TABLE sessions ADD COLUMN passkey_id TEXT;`,
+  // 3: a journal: any number of visits per station and mode, each with an optional note
+  `CREATE TABLE entries (
+     id         INTEGER PRIMARY KEY,
+     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     station    TEXT NOT NULL,
+     mode       TEXT NOT NULL,
+     visited_on TEXT NOT NULL,
+     note       TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX entries_user ON entries(user_id, visited_on);
+   INSERT INTO entries (user_id, station, mode, visited_on, created_at)
+     SELECT user_id, station, mode, visited_on, created_at FROM visits ORDER BY visited_on, created_at;
+   DROP TABLE visits;`,
 ];
 
 function migrate(db: Database) {
@@ -131,17 +149,17 @@ export function openDb(path: string) {
     nameTaken: db.query<{ id: number }, { $k: string; $u: number }>('SELECT id FROM users WHERE name_key = $k AND id != $u'),
     setName: db.query('UPDATE users SET name = $n, name_key = $k WHERE id = $u'),
     setHandle: db.query('UPDATE users SET handle = $h WHERE id = $u AND handle IS NULL'),
-    visits: db.query<Visit, { $u: number }>(
-      'SELECT station, mode, visited_on AS date FROM visits WHERE user_id = $u ORDER BY visited_on DESC, created_at DESC'),
-    upsertVisit: db.query(`INSERT INTO visits (user_id, station, mode, visited_on) VALUES ($u, $s, $m, $d)
-      ON CONFLICT (user_id, station, mode) DO UPDATE SET visited_on = excluded.visited_on`),
-    deleteVisit: db.query('DELETE FROM visits WHERE user_id = $u AND station = $s AND mode = $m'),
-    // the earlier date wins when two collections are merged
-    mergeVisits: db.query(`INSERT INTO visits (user_id, station, mode, visited_on, created_at)
-      SELECT $to, station, mode, visited_on, created_at FROM visits WHERE user_id = $from
-      ON CONFLICT (user_id, station, mode) DO UPDATE SET visited_on = min(visits.visited_on, excluded.visited_on)`),
+    entries: db.query<Entry, { $u: number }>(
+      'SELECT id, station, mode, visited_on AS date, note FROM entries WHERE user_id = $u ORDER BY visited_on DESC, id DESC'),
+    entry: db.query<Entry, { $u: number; $id: number }>(
+      'SELECT id, station, mode, visited_on AS date, note FROM entries WHERE user_id = $u AND id = $id'),
+    addEntry: db.query<{ id: number }, { $u: number; $s: string; $m: string; $d: string; $n: string | null }>(
+      'INSERT INTO entries (user_id, station, mode, visited_on, note) VALUES ($u, $s, $m, $d, $n) RETURNING id'),
+    updateEntry: db.query('UPDATE entries SET visited_on = $d, note = $n WHERE user_id = $u AND id = $id'),
+    deleteEntry: db.query('DELETE FROM entries WHERE user_id = $u AND id = $id'),
+    mergeEntries: db.query('UPDATE entries SET user_id = $to WHERE user_id = $from'),
     deleteUser: db.query('DELETE FROM users WHERE id = $u'),
-    countVisits: db.query<{ n: number }, { $u: number }>('SELECT count(*) AS n FROM visits WHERE user_id = $u'),
+    countEntries: db.query<{ n: number }, { $u: number }>('SELECT count(*) AS n FROM entries WHERE user_id = $u'),
     passkey: db.query<Record<string, unknown>, { $id: string }>('SELECT * FROM passkeys WHERE id = $id'),
     passkeysOf: db.query<Record<string, unknown>, { $u: number }>('SELECT * FROM passkeys WHERE user_id = $u ORDER BY created_at'),
     insertPasskey: db.query(`INSERT INTO passkeys (id, user_id, public_key, counter, transports, backed_up, aaguid)
@@ -193,19 +211,28 @@ export function openDb(path: string) {
       q.setHandle.run({ $h: fresh, $u: userId });
       return q.userById.get({ $u: userId })!.handle!;
     },
-    visits(userId: number): Visit[] { return q.visits.all({ $u: userId }); },
-    setVisit(userId: number, station: string, mode: Mode, date: string) { q.upsertVisit.run({ $u: userId, $s: station, $m: mode, $d: date }); },
-    deleteVisit(userId: number, station: string, mode: Mode) { q.deleteVisit.run({ $u: userId, $s: station, $m: mode }); },
-    /** Everything `from` collected goes to `to`, and `from` is gone */
+    /** The user's journal, newest first */
+    entries(userId: number): Entry[] { return q.entries.all({ $u: userId }); },
+    entry(userId: number, id: number): Entry | null { return q.entry.get({ $u: userId, $id: id }) ?? null; },
+    /** Log a visit; returns its id */
+    addEntry(userId: number, e: { station: string; mode: Mode; date: string; note?: string | null }): number {
+      return q.addEntry.get({ $u: userId, $s: e.station, $m: e.mode, $d: e.date, $n: e.note || null })!.id;
+    },
+    /** Change a visit's date and note; false if it isn't the user's */
+    updateEntry(userId: number, id: number, e: { date: string; note: string | null }): boolean {
+      return q.updateEntry.run({ $u: userId, $id: id, $d: e.date, $n: e.note || null }).changes > 0;
+    },
+    deleteEntry(userId: number, id: number): boolean { return q.deleteEntry.run({ $u: userId, $id: id }).changes > 0; },
+    /** Everything `from` logged goes to `to`, and `from` is gone */
     mergeInto(from: number, to: number) {
       if (from === to) return;
       db.transaction(() => {
-        q.mergeVisits.run({ $from: from, $to: to });
+        q.mergeEntries.run({ $from: from, $to: to });
         q.deleteUser.run({ $u: from });
       })();
     },
     deleteUser(userId: number) { q.deleteUser.run({ $u: userId }); },
-    countVisits(userId: number) { return q.countVisits.get({ $u: userId })!.n; },
+    countEntries(userId: number) { return q.countEntries.get({ $u: userId })!.n; },
     passkey(id: string): Passkey | null { const r = q.passkey.get({ $id: id }); return r ? toPasskey(r) : null; },
     passkeys(userId: number): Passkey[] { return q.passkeysOf.all({ $u: userId }).map(toPasskey); },
     addPasskey(userId: number, p: { id: string; publicKey: Uint8Array; counter: number; transports?: string[]; backedUp: boolean; aaguid?: string }) {

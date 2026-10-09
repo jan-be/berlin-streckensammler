@@ -23,43 +23,53 @@ describe('names', () => {
   });
 });
 
-describe('store', () => {
-  test('visits are kept per station and mode', () => {
+describe('journal', () => {
+  test('any number of visits per station and mode, newest first', () => {
     const s = openDb(':memory:');
     const u = s.createUser();
     const token = s.createSession(u.id);
     expect(s.userForToken(token)?.id).toBe(u.id);
-    s.setVisit(u.id, 'a', 'U', '2026-10-01');
-    s.setVisit(u.id, 'a', 'S', '2026-10-02');
-    s.setVisit(u.id, 'a', 'U', '2026-10-03'); // same pair again: new date
-    expect(s.visits(u.id)).toEqual([
-      { station: 'a', mode: 'U', date: '2026-10-03' },
-      { station: 'a', mode: 'S', date: '2026-10-02' },
+    const a = s.addEntry(u.id, { station: 'a', mode: 'U', date: '2026-10-01' });
+    const b = s.addEntry(u.id, { station: 'a', mode: 'U', date: '2026-10-03', note: 'Dinner at the Turkish place' });
+    s.addEntry(u.id, { station: 'a', mode: 'S', date: '2026-10-02' });
+    expect(s.entries(u.id)).toEqual([
+      { id: b, station: 'a', mode: 'U', date: '2026-10-03', note: 'Dinner at the Turkish place' },
+      { id: 3, station: 'a', mode: 'S', date: '2026-10-02', note: null },
+      { id: a, station: 'a', mode: 'U', date: '2026-10-01', note: null },
     ]);
-    s.deleteVisit(u.id, 'a', 'S');
-    expect(s.visits(u.id).length).toBe(1);
   });
 
-  test('merging keeps the earlier date and removes the anonymous user', () => {
+  test('a visit can be changed and deleted, only by its owner', () => {
+    const s = openDb(':memory:');
+    const u = s.createUser(), other = s.createUser();
+    const id = s.addEntry(u.id, { station: 'a', mode: 'U', date: '2026-10-01' });
+    expect(s.updateEntry(other.id, id, { date: '2026-01-01', note: 'x' })).toBe(false);
+    expect(s.updateEntry(u.id, id, { date: '2026-09-30', note: 'Concert' })).toBe(true);
+    expect(s.entry(u.id, id)).toEqual({ id, station: 'a', mode: 'U', date: '2026-09-30', note: 'Concert' });
+    expect(s.deleteEntry(other.id, id)).toBe(false);
+    expect(s.deleteEntry(u.id, id)).toBe(true);
+    expect(s.entries(u.id)).toEqual([]);
+  });
+
+  test('merging moves every visit and removes the anonymous user', () => {
     const s = openDb(':memory:');
     const account = s.createUser(), anon = s.createUser();
     const anonToken = s.createSession(anon.id);
-    s.setVisit(account.id, 'a', 'U', '2026-09-01');
-    s.setVisit(anon.id, 'a', 'U', '2026-10-01');
-    s.setVisit(anon.id, 'b', 'S', '2026-10-02');
+    s.addEntry(account.id, { station: 'a', mode: 'U', date: '2026-09-01' });
+    s.addEntry(anon.id, { station: 'a', mode: 'U', date: '2026-10-01', note: 'again' });
+    s.addEntry(anon.id, { station: 'b', mode: 'S', date: '2026-10-02' });
+    expect(s.countEntries(anon.id)).toBe(2);
     s.mergeInto(anon.id, account.id);
-    expect(s.visits(account.id).sort((x, y) => x.station.localeCompare(y.station))).toEqual([
-      { station: 'a', mode: 'U', date: '2026-09-01' },
-      { station: 'b', mode: 'S', date: '2026-10-02' },
-    ]);
+    expect(s.entries(account.id).map(e => `${e.station}${e.mode}${e.date}`)).toEqual(['bS2026-10-02', 'aU2026-10-01', 'aU2026-09-01']);
     expect(s.userForToken(anonToken)).toBeNull();
   });
+});
 
+describe('accounts', () => {
   test('the user handle is made once', () => {
     const s = openDb(':memory:');
     const u = s.createUser();
-    const h = s.handle(u.id, 'first');
-    expect(h).toBe('first');
+    expect(s.handle(u.id, 'first')).toBe('first');
     expect(s.handle(u.id)).toBe('first');
   });
 
@@ -81,39 +91,41 @@ describe('store', () => {
     const s = openDb(':memory:');
     const u = s.createUser();
     const token = s.createSession(u.id);
-    s.setVisit(u.id, 'a', 'U', '2026-10-01');
+    s.addEntry(u.id, { station: 'a', mode: 'U', date: '2026-10-01' });
     s.addPasskey(u.id, { id: 'k', publicKey: new Uint8Array([1]), counter: 0, backedUp: false });
     s.deleteUser(u.id);
     expect(s.userForToken(token)).toBeNull();
-    expect(s.visits(u.id)).toEqual([]);
+    expect(s.entries(u.id)).toEqual([]);
     expect(s.passkey('k')).toBeNull();
   });
 });
 
-describe('migration from the sync-code schema', () => {
-  test('keeps users, sessions and visits; drops the codes', () => {
+const V1 = `
+  CREATE TABLE users (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), seen_at TEXT NOT NULL DEFAULT (datetime('now')));
+  CREATE TABLE visits (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, station TEXT NOT NULL, mode TEXT NOT NULL,
+    visited_on TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, station, mode)) WITHOUT ROWID;
+  INSERT INTO users (id, code) VALUES (7, 'AAAA-BBBB-CCCC-DDDD');
+  INSERT INTO sessions (token_hash, user_id) VALUES ('h', 7);
+  INSERT INTO visits (user_id, station, mode, visited_on) VALUES (7, 'x', 'U', '2026-10-08'), (7, 'y', 'S', '2026-10-01');
+`;
+
+describe('migrations', () => {
+  test('from the sync-code schema: users, sessions and visits kept, codes gone, visits become entries', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'ss-')), 'old.db');
     const old = new Database(path, { create: true });
-    old.exec(`
-      CREATE TABLE users (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')), seen_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE visits (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, station TEXT NOT NULL, mode TEXT NOT NULL,
-        visited_on TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, station, mode)) WITHOUT ROWID;
-      INSERT INTO users (id, code) VALUES (7, 'AAAA-BBBB-CCCC-DDDD');
-      INSERT INTO sessions (token_hash, user_id) VALUES ('h', 7);
-      INSERT INTO visits (user_id, station, mode, visited_on) VALUES (7, 'x', 'U', '2026-10-08');
-    `);
+    old.exec(V1);
     old.close();
     const s = openDb(path);
     expect(s.user(7)).toEqual({ id: 7, name: null, handle: null });
-    expect(s.visits(7)).toEqual([{ station: 'x', mode: 'U', date: '2026-10-08' }]);
+    expect(s.entries(7).map(e => [e.station, e.mode, e.date, e.note])).toEqual([['x', 'U', '2026-10-08', null], ['y', 'S', '2026-10-01', null]]);
     const cols = (s.db.query('PRAGMA table_info(users)').all() as { name: string }[]).map(c => c.name);
     expect(cols).not.toContain('code');
+    expect(s.db.query("SELECT name FROM sqlite_master WHERE name = 'visits'").get()).toBeNull();
     expect((s.db.query('SELECT count(*) AS n FROM sessions').get() as { n: number }).n).toBe(1);
     s.db.close();
     // opening again changes nothing
-    const again = openDb(path);
-    expect(again.visits(7).length).toBe(1);
+    expect(openDb(path).entries(7).length).toBe(2);
   });
 });

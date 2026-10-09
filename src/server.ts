@@ -4,7 +4,7 @@
  */
 import index from './index.html';
 import stationsData from '../data/stations.json';
-import { openDb, MODES, type Mode, type Store } from './db';
+import { openDb, MODES, NOTE_MAX, type Mode, type Store } from './db';
 import { authRoutes, accountView } from './auth';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -39,6 +39,13 @@ const clearCookie = `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${PROD
 /** A visit's date: what the phone says today is, else today in Berlin */
 const berlinToday = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' });
 const validDate = (d: unknown): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d));
+/** A note as stored: trimmed, at most NOTE_MAX characters, null when empty; undefined if it isn't text */
+function cleanNote(n: unknown): string | null | undefined {
+  if (n === undefined || n === null) return null;
+  if (typeof n !== 'string') return undefined;
+  const t = n.replace(/\r\n?/g, '\n').trim();
+  return t ? t.slice(0, NOTE_MAX) : null;
+}
 
 /** Only JSON bodies: a form on another site cannot post here with the cookie */
 async function body(req: Request): Promise<Record<string, unknown> | null> {
@@ -61,23 +68,25 @@ export function createServer(store: Store, port = PORT) {
         return new Response(dataBody, { headers: { 'Content-Type': 'application/json', ETag: dataEtag, 'Cache-Control': 'no-cache' } });
       },
 
-      // The account (null while collecting without one) and what was collected
+      // The account (null while collecting without one) and the journal
       '/api/me': req => {
         const u = me(req);
         return json({
           account: accountView(store, u),
-          visits: u ? store.visits(u.id).map(v => [v.station, v.mode, v.date]) : [],
+          entries: u ? store.entries(u.id).map(e => [e.id, e.station, e.mode, e.date, e.note]) : [],
         });
       },
 
-      // Collect a station in a mode (the first one without an account starts an anonymous collection)
-      '/api/visits': {
-        PUT: async req => {
+      // Log a visit (the first one without an account starts an anonymous journal)
+      '/api/entries': {
+        POST: async req => {
           const b = await body(req);
           if (!b) return error(415, 'json_expected');
           const { station, mode, date } = b as { station?: string; mode?: Mode; date?: string };
           if (typeof station !== 'string' || !stationIds.has(station)) return error(400, 'unknown_station');
           if (!MODES.includes(mode as Mode) || !stationModes.get(station)!.includes(mode!)) return error(400, 'mode_not_served');
+          const note = cleanNote(b.note);
+          if (note === undefined) return error(400, 'note_invalid');
           const on = validDate(date) ? date : berlinToday();
           let u = me(req);
           const headers: Record<string, string> = {};
@@ -85,17 +94,31 @@ export function createServer(store: Store, port = PORT) {
             u = store.createUser();
             headers['Set-Cookie'] = sessionCookie(store.createSession(u.id));
           }
-          store.setVisit(u.id, station, mode!, on);
-          return json({ ok: true, date: on }, { headers });
+          const id = store.addEntry(u.id, { station, mode: mode!, date: on, note });
+          return json({ ok: true, entry: [id, station, mode, on, note] }, { headers });
         },
-        DELETE: async req => {
+      },
+      // Change a visit's date or note, or delete it
+      '/api/entries/:id': {
+        PATCH: async req => {
           const b = await body(req);
           if (!b) return error(415, 'json_expected');
           const u = me(req);
-          if (!u) return json({ ok: true });
-          const { station, mode } = b as { station?: string; mode?: Mode };
-          if (typeof station !== 'string' || !MODES.includes(mode as Mode)) return error(400, 'station_and_mode_expected');
-          store.deleteVisit(u.id, station, mode!);
+          const id = Number(req.params.id);
+          const old = u && Number.isInteger(id) ? store.entry(u.id, id) : null;
+          if (!old) return error(404, 'not_found');
+          const date = b.date === undefined ? old.date : b.date;
+          if (!validDate(date)) return error(400, 'date_invalid');
+          const note = b.note === undefined ? old.note : cleanNote(b.note);
+          if (note === undefined) return error(400, 'note_invalid');
+          store.updateEntry(u!.id, id, { date, note });
+          return json({ ok: true, entry: [id, old.station, old.mode, date, note] });
+        },
+        DELETE: async req => {
+          if (!(await body(req))) return error(415, 'json_expected');
+          const u = me(req);
+          const id = Number(req.params.id);
+          if (!u || !Number.isInteger(id) || !store.deleteEntry(u.id, id)) return error(404, 'not_found');
           return json({ ok: true });
         },
       },

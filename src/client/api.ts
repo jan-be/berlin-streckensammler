@@ -28,6 +28,11 @@ export const localToday = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+/** A visit: [id, station, mode, date, note] on the wire */
+export type Entry = { id: number; station: string; mode: Mode; date: string; note: string | null };
+type RawEntry = [number, string, Mode, string, string | null];
+export const toEntry = ([id, station, mode, date, note]: RawEntry): Entry => ({ id, station, mode, date, note });
+
 export type Account = {
   name: string;
   passkeys: { id: string; createdAt: string; lastUsedAt: string | null; synced: boolean; provider: string | null; current: boolean }[];
@@ -42,10 +47,16 @@ export const cancelled = (e: unknown) => e instanceof Error && (e.name === 'NotA
 
 export const api = {
   data: () => call<unknown>('GET', '/api/data'),
-  me: () => call<{ account: Account | null; visits: [string, Mode, string][] }>('GET', '/api/me'),
-  collect: (station: string, mode: Mode, date = localToday()) =>
-    call<{ ok: true; date: string }>('PUT', '/api/visits', { station, mode, date }),
-  uncollect: (station: string, mode: Mode) => call<{ ok: true }>('DELETE', '/api/visits', { station, mode }),
+  me: async () => {
+    const r = await call<{ account: Account | null; entries: RawEntry[] }>('GET', '/api/me');
+    return { account: r.account, entries: r.entries.map(toEntry) };
+  },
+  /** Log a visit (today unless a date is given) */
+  addEntry: async (station: string, mode: Mode, opts: { date?: string; note?: string | null } = {}) =>
+    toEntry((await call<{ entry: RawEntry }>('POST', '/api/entries', { station, mode, date: opts.date ?? localToday(), note: opts.note ?? null })).entry),
+  updateEntry: async (id: number, patch: { date?: string; note?: string | null }) =>
+    toEntry((await call<{ entry: RawEntry }>('PATCH', `/api/entries/${id}`, patch)).entry),
+  deleteEntry: (id: number) => call<{ ok: true }>('DELETE', `/api/entries/${id}`, {}),
 
   /** A new account: the name, then the device makes a passkey */
   async createAccount(name: string) {

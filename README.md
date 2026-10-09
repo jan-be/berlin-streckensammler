@@ -3,8 +3,9 @@
 Log which of Berlin's public transport stations you have been to, by mode:
 S-Bahn, U-Bahn, regional trains, tram, bus and ferry. Type a station's name or
 look up the stops near you (your location is asked for once and never leaves the
-browser), and tap to collect it. Progress per mode and per line, with each line's
-stations in order.
+browser), and tap to log a visit. Every visit is a journal entry with a date and an
+optional note on what you did there; a station counts as collected from its first.
+Progress per mode and per line, with each line's stations in order.
 
 Live at https://berlin-streckensammler.janbe.eu
 
@@ -13,7 +14,8 @@ Live at https://berlin-streckensammler.janbe.eu
 - **One Bun process** (`src/server.ts`) serves everything: the React app, which
   Bun bundles from `src/index.html`, the station data and a small JSON API.
   No separate web server.
-- **SQLite** (`bun:sqlite`, `src/db.ts`): users, sessions, passkeys and visits.
+- **SQLite** (`bun:sqlite`, `src/db.ts`): users, sessions, passkeys and the journal
+  (`entries`: station, mode, date, note; any number per station).
   Collecting needs no account: the first station collected starts an anonymous
   collection tied to a session cookie. **Accounts** (`src/auth.ts`) are a name plus
   passkeys (WebAuthn via `@simplewebauthn`, discoverable credentials, so signing in
