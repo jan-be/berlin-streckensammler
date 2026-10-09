@@ -125,6 +125,26 @@ export function createServer(store: Store, port = PORT) {
 
       ...authRoutes({ store, me, token, json, error, body, cookie: sessionCookie }),
 
+      // Everything stored about you, as a file (Art. 15 and 20 GDPR)
+      '/api/export': req => {
+        const u = me(req);
+        const data = u ? store.exportUser(u.id) : null;
+        const stations = new Map((stationsData.stations as unknown[][]).map(st => [st[0] as string, st[1] as string]));
+        const body = {
+          exportedAt: new Date().toISOString(),
+          site: 'berlin-streckensammler.janbe.eu',
+          ...(data ?? { account: null, passkeys: [], sessions: [], visits: [] }),
+        };
+        body.visits = body.visits.map(v => ({ ...v, stationName: stations.get(v.station as string) ?? null }));
+        return new Response(JSON.stringify(body, null, 2), {
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="streckensammler-daten.json"',
+            'Cache-Control': 'no-store',
+          },
+        });
+      },
+
       '/api/logout': {
         POST: async req => {
           const t = token(req);

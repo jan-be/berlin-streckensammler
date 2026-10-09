@@ -250,3 +250,17 @@ main { flex: 1; }
 .edit-form { display: flex; flex-direction: column; gap: 8px; }
 .edit-actions { display: flex; align-items: center; gap: 8px; }
 .edit-actions .red { margin-left: auto; }
+
+/* legal page and footer links */
+.foot-links { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.link.github { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; }
+.privacy-links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; }
+.privacy-links a { text-decoration: none; }
+.legal { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 4px 18px 18px; margin-top: 6px; line-height: 1.55; }
+.legal .back { margin-top: 10px; }
+.legal h1 { font-size: 1.35rem; margin: 18px 0 6px; }
+.legal h2 { text-transform: none; letter-spacing: 0; font-size: 1rem; color: var(--text); margin: 18px 0 4px; }
+.legal p, .legal li { font-size: 0.93rem; }
+.legal ul { padding-left: 20px; }
+.legal code { font-size: 0.85em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.legal section { scroll-margin-top: 70px; }

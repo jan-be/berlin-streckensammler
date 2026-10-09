@@ -4,21 +4,24 @@ import { api, ApiError, cancelled, localToday, passkeysSupported, type Account, 
 import { STRINGS, formatDate, formatMonth, initialLang, type Lang, type T } from './i18n';
 import { MODE_COLOR, ModeIcon, PasskeyIcon } from './icons';
 import { providerName } from './passkeyProviders';
+import { LegalPage, REPO } from './legal';
 
 // ── routes ─────────────────────────────────────────────────────────────────
 const SLUG: Record<Mode, string> = { S: 's-bahn', U: 'u-bahn', R: 'regio', T: 'tram', B: 'bus', F: 'faehre' };
 const MODE_OF_SLUG = Object.fromEntries(Object.entries(SLUG).map(([m, s]) => [s, m])) as Record<string, Mode>;
 const JOURNAL = 'besuche';
-type Route = { mode: Mode | null; line: string | null; journal?: boolean };
+const LEGAL = ['rechtliches', 'impressum', 'datenschutz'];
+type Route = { mode: Mode | null; line: string | null; journal?: boolean; legal?: 'rechtliches' | 'impressum' | 'datenschutz' };
 
 function parseRoute(path: string): Route {
   const [slug, line] = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (slug === JOURNAL) return { mode: null, line: null, journal: true };
+  if (LEGAL.includes(slug)) return { mode: null, line: null, legal: slug as Route['legal'] };
   const mode = MODE_OF_SLUG[slug] ?? null;
   return { mode, line: mode && line ? line : null };
 }
 const routePath = (r: Route) =>
-  r.journal ? `/${JOURNAL}` : r.mode ? `/${SLUG[r.mode]}${r.line ? `/${encodeURIComponent(r.line)}` : ''}` : '/';
+  r.legal ? `/${r.legal}` : r.journal ? `/${JOURNAL}` : r.mode ? `/${SLUG[r.mode]}${r.line ? `/${encodeURIComponent(r.line)}` : ''}` : '/';
 
 const key = (station: string, mode: Mode) => `${station}|${mode}`;
 
@@ -192,7 +195,7 @@ export function App() {
   const line = route.line ? net.linesByMode[route.mode!]?.find(l => l.name === route.line) ?? null : null;
   const results = query.trim() ? search(net.stations, query, mode) : null;
   const nearby = near?.status === 'ok' && near.at ? nearest(net.stations, near.at, mode) : null;
-  const showBanner = !account && !bannerGone && entries.length >= 3 && !mode && !route.journal && !results && !near;
+  const showBanner = !account && !bannerGone && entries.length >= 3 && !mode && !route.journal && !route.legal && !results && !near;
   const openStation = (s: Station) => setSheet({ station: s });
   const list = { collected, onTap: quickTap, onOpen: openStation, t };
 
@@ -263,6 +266,9 @@ export function App() {
               </>
             )}
           </section>
+        ) : route.legal ? (
+          <LegalPage lang={lang} section={route.legal === 'rechtliches' ? undefined : route.legal}
+            onBack={() => go({ mode: null, line: null })} backLabel={t.back} />
         ) : route.journal ? (
           <JournalPage net={net} entries={entries} onOpen={openStation} onBack={() => go({ mode: null, line: null })} lang={lang} t={t} />
         ) : line ? (
@@ -278,7 +284,15 @@ export function App() {
       <footer className="foot">
         <p>{t.attribution(formatDate(net.feedDate, lang))}</p>
         <p>{t.disclaimer} {t.signsCredit}</p>
-        <p><button className="link" onClick={() => setLang(lang === 'de' ? 'en' : 'de')}>{t.language}</button> · <button className="link" onClick={() => setAccountOpen(true)}>{t.privacyTitle}</button></p>
+        <p className="foot-links">
+          <button className="link" onClick={() => go({ mode: null, line: null, legal: 'impressum' })}>{t.imprint}</button>
+          <button className="link" onClick={() => go({ mode: null, line: null, legal: 'datenschutz' })}>{t.privacyTitle}</button>
+          <a className="link github" href={REPO} target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" /></svg>
+            {t.sourceCode}
+          </a>
+          <button className="link" onClick={() => setLang(lang === 'de' ? 'en' : 'de')}>{t.language}</button>
+        </p>
       </footer>
 
       {sheet && (
@@ -756,6 +770,10 @@ function AccountSheet({ account, collected, lang, t, onClose, onChanged, onToast
     <>
       <h4>{t.privacyTitle}</h4>
       <ul className="privacy">{t.privacy.map(p => <li key={p} className="small">{p}</li>)}</ul>
+      <p className="privacy-links small">
+        {collected > 0 || account ? <a className="link" href="/api/export" download>{t.exportData}</a> : null}
+        <a className="link" href="/datenschutz" onClick={e => { e.preventDefault(); onClose(); history.pushState(null, '', '/datenschutz'); dispatchEvent(new PopStateEvent('popstate')); }}>{t.privacyFull}</a>
+      </p>
     </>
   );
 

@@ -160,6 +160,11 @@ export function openDb(path: string) {
     mergeEntries: db.query('UPDATE entries SET user_id = $to WHERE user_id = $from'),
     deleteUser: db.query('DELETE FROM users WHERE id = $u'),
     countEntries: db.query<{ n: number }, { $u: number }>('SELECT count(*) AS n FROM entries WHERE user_id = $u'),
+    userCreated: db.query<{ created_at: string }, { $u: number }>('SELECT created_at FROM users WHERE id = $u'),
+    sessionsOf: db.query<{ created_at: string; seen_at: string; passkey_id: string | null }, { $u: number }>(
+      'SELECT created_at, seen_at, passkey_id FROM sessions WHERE user_id = $u ORDER BY created_at'),
+    entriesFull: db.query<Record<string, unknown>, { $u: number }>(
+      'SELECT id, station, mode, visited_on, note, created_at FROM entries WHERE user_id = $u ORDER BY visited_on, id'),
     passkey: db.query<Record<string, unknown>, { $id: string }>('SELECT * FROM passkeys WHERE id = $id'),
     passkeysOf: db.query<Record<string, unknown>, { $u: number }>('SELECT * FROM passkeys WHERE user_id = $u ORDER BY created_at'),
     insertPasskey: db.query(`INSERT INTO passkeys (id, user_id, public_key, counter, transports, backed_up, aaguid)
@@ -233,6 +238,22 @@ export function openDb(path: string) {
     },
     deleteUser(userId: number) { q.deleteUser.run({ $u: userId }); },
     countEntries(userId: number) { return q.countEntries.get({ $u: userId })!.n; },
+    /** Everything stored about a user (Art. 15 and 20 GDPR); session tokens only exist hashed and are left out */
+    exportUser(userId: number) {
+      const u = q.userById.get({ $u: userId });
+      if (!u) return null;
+      return {
+        account: { name: u.name, createdAt: q.userCreated.get({ $u: userId })!.created_at },
+        passkeys: q.passkeysOf.all({ $u: userId }).map(r => ({
+          id: r.id, publicKey: Buffer.from(r.public_key as Uint8Array).toString('base64url'), aaguid: r.aaguid,
+          synced: !!r.backed_up, counter: r.counter, createdAt: r.created_at, lastUsedAt: r.last_used_at,
+        })),
+        sessions: q.sessionsOf.all({ $u: userId }).map(s => ({ createdAt: s.created_at, lastSeen: s.seen_at, passkey: s.passkey_id })),
+        visits: q.entriesFull.all({ $u: userId }).map(e => ({
+          id: e.id, station: e.station, mode: e.mode, date: e.visited_on, note: e.note, loggedAt: e.created_at,
+        })),
+      };
+    },
     passkey(id: string): Passkey | null { const r = q.passkey.get({ $id: id }); return r ? toPasskey(r) : null; },
     passkeys(userId: number): Passkey[] { return q.passkeysOf.all({ $u: userId }).map(toPasskey); },
     addPasskey(userId: number, p: { id: string; publicKey: Uint8Array; counter: number; transports?: string[]; backedUp: boolean; aaguid?: string }) {
